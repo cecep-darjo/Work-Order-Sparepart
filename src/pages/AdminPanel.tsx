@@ -1,0 +1,444 @@
+import { useEffect, useState } from 'react';
+import { useAuth } from '@/context/AuthContext';
+import {
+  supabase,
+  ROLE_LABELS,
+  type Role,
+  type Department,
+  type Area,
+  type Equipment,
+  type Profile,
+} from '@/lib/supabase';
+import { normalizeUsername, validatePassword, validateUsername } from '@/lib/authUsername';
+import { Card, Badge, Button, Input, Select, Label, Modal, Spinner } from '@/components/ui';
+import { Building2, MapPin, Cpu, Users, Plus, Pencil, Trash2 } from 'lucide-react';
+
+type Tab = 'departments' | 'areas' | 'equipment' | 'users';
+
+export default function AdminPanel() {
+  const { profile } = useAuth();
+  const [tab, setTab] = useState<Tab>('departments');
+  const [loading, setLoading] = useState(true);
+
+  const [departments, setDepartments] = useState<Department[]>([]);
+  const [areas, setAreas] = useState<(Area & { department?: Department })[]>([]);
+  const [equipment, setEquipment] = useState<(Equipment & { area?: Area & { department?: Department } })[]>([]);
+  const [users, setUsers] = useState<Profile[]>([]);
+
+  const [showForm, setShowForm] = useState(false);
+  const [editing, setEditing] = useState<{ type: string; id?: string; data?: Record<string, unknown> } | null>(null);
+  const [acting, setActing] = useState(false);
+
+  // Form state
+  const [deptForm, setDeptForm] = useState({ name: '', code: '' });
+  const [areaForm, setAreaForm] = useState({ department_id: '', name: '' });
+  const [equipForm, setEquipForm] = useState({ area_id: '', name: '', code: '' });
+  const [userForm, setUserForm] = useState({
+    username: '',
+    full_name: '',
+    role: 'teknisi' as Role,
+    department_id: '',
+    password: '',
+  });
+
+  useEffect(() => {
+    loadAll();
+  }, []);
+
+  async function loadAll() {
+    setLoading(true);
+    const [{ data: d }, { data: a }, { data: e }, { data: u }] = await Promise.all([
+      supabase.from('departments').select('*').order('name'),
+      supabase.from('areas').select('*, department:departments(*)').order('name'),
+      supabase.from('equipment').select('*, area:areas(*, department:departments(*))').order('name'),
+      supabase.from('profiles').select('*').order('full_name'),
+    ]);
+    setDepartments((d as Department[]) ?? []);
+    setAreas((a as unknown as (Area & { department?: Department })[]) ?? []);
+    setEquipment((e as unknown as (Equipment & { area?: Area & { department?: Department } })[]) ?? []);
+    setUsers((u as Profile[]) ?? []);
+    setLoading(false);
+  }
+
+  function openCreate(type: Tab) {
+    if (type === 'departments') setDeptForm({ name: '', code: '' });
+    if (type === 'areas') setAreaForm({ department_id: '', name: '' });
+    if (type === 'equipment') setEquipForm({ area_id: '', name: '', code: '' });
+    if (type === 'users') setUserForm({ username: '', full_name: '', role: 'teknisi', department_id: '', password: '' });
+    setEditing({ type });
+    setShowForm(true);
+  }
+
+  function openEdit(type: Tab, id: string, data: Record<string, unknown>) {
+    if (type === 'departments') setDeptForm({ name: data.name as string, code: data.code as string });
+    if (type === 'areas') setAreaForm({ department_id: data.department_id as string, name: data.name as string });
+    if (type === 'equipment') setEquipForm({ area_id: data.area_id as string, name: data.name as string, code: (data.code as string) ?? '' });
+    if (type === 'users') {
+      setUserForm({
+        username: (data.username as string) ?? '',
+        full_name: data.full_name as string,
+        role: data.role as Role,
+        department_id: (data.department_id as string) ?? '',
+        password: '',
+      });
+    }
+    setEditing({ type, id, data });
+    setShowForm(true);
+  }
+
+  async function handleSave() {
+    if (!editing || !profile) return;
+    setActing(true);
+
+    if (editing.type === 'departments') {
+      if (editing.id) {
+        await supabase.from('departments').update(deptForm).eq('id', editing.id);
+      } else {
+        await supabase.from('departments').insert(deptForm);
+      }
+    } else if (editing.type === 'areas') {
+      if (editing.id) {
+        await supabase.from('areas').update({ department_id: areaForm.department_id, name: areaForm.name }).eq('id', editing.id);
+      } else {
+        await supabase.from('areas').insert({ department_id: areaForm.department_id, name: areaForm.name });
+      }
+    } else if (editing.type === 'equipment') {
+      if (editing.id) {
+        await supabase.from('equipment').update({ area_id: equipForm.area_id, name: equipForm.name, code: equipForm.code || null }).eq('id', editing.id);
+      } else {
+        await supabase.from('equipment').insert({ area_id: equipForm.area_id, name: equipForm.name, code: equipForm.code || null });
+      }
+    } else if (editing.type === 'users') {
+      if (editing.id) {
+        if (userForm.password) {
+          const passwordError = validatePassword(userForm.password);
+          if (passwordError) {
+            alert(passwordError);
+            setActing(false);
+            return;
+          }
+        }
+        const { error: updateError } = await supabase
+          .from('profiles')
+          .update({
+            full_name: userForm.full_name,
+            role: userForm.role,
+            department_id: userForm.department_id || null,
+          })
+          .eq('id', editing.id);
+        if (updateError) {
+          alert(updateError.message);
+          setActing(false);
+          return;
+        }
+        if (userForm.password) {
+          const { error: pwError } = await supabase.rpc('admin_set_password', {
+            p_user_id: editing.id,
+            p_password: userForm.password,
+          });
+          if (pwError) {
+            alert('Data user tersimpan, tetapi password gagal diganti: ' + pwError.message);
+            setActing(false);
+            return;
+          }
+        }
+      } else {
+        const uname = normalizeUsername(userForm.username);
+        const validationError = validateUsername(uname) ?? validatePassword(userForm.password);
+        if (validationError) {
+          alert(validationError);
+          setActing(false);
+          return;
+        }
+        const { error } = await supabase.rpc('admin_create_user', {
+          p_username: uname,
+          p_password: userForm.password,
+          p_full_name: userForm.full_name,
+          p_role: userForm.role,
+          p_department_id: userForm.department_id || null,
+        });
+        if (error) {
+          alert(error.message);
+          setActing(false);
+          return;
+        }
+      }
+    }
+
+    // Log activity
+    await supabase.from('activity_log').insert({
+      user_id: profile.id,
+      action: `manage_${editing.type}`,
+      entity_type: editing.type,
+      entity_id: editing.id,
+      details: `${editing.id ? 'Updated' : 'Created'} ${editing.type}`,
+    });
+
+    setActing(false);
+    setShowForm(false);
+    setEditing(null);
+    loadAll();
+  }
+
+  async function handleDelete(type: Tab, id: string) {
+    if (!confirm(`Delete this ${type.slice(0, -1)}?`)) return;
+    if (type === 'departments') await supabase.from('departments').delete().eq('id', id);
+    if (type === 'areas') await supabase.from('areas').delete().eq('id', id);
+    if (type === 'equipment') await supabase.from('equipment').delete().eq('id', id);
+    if (type === 'users') await supabase.from('profiles').delete().eq('id', id);
+    loadAll();
+  }
+
+  if (loading) return <Spinner />;
+
+  const tabs: { key: Tab; label: string; icon: typeof Building2 }[] = [
+    { key: 'departments', label: 'Departments', icon: Building2 },
+    { key: 'areas', label: 'Areas', icon: MapPin },
+    { key: 'equipment', label: 'Equipment', icon: Cpu },
+    { key: 'users', label: 'Users', icon: Users },
+  ];
+
+  return (
+    <div className="space-y-4">
+      {/* Tabs */}
+      <div className="flex gap-1 p-1 bg-slate-100 rounded-lg w-fit overflow-x-auto">
+        {tabs.map((t) => {
+          const Icon = t.icon;
+          return (
+            <button
+              key={t.key}
+              onClick={() => setTab(t.key)}
+              className={`flex items-center gap-2 px-3 sm:px-4 py-2 rounded-md text-sm font-medium transition whitespace-nowrap ${
+                tab === t.key ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-700'
+              }`}
+            >
+              <Icon className="w-4 h-4" />
+              <span className="hidden sm:inline">{t.label}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Content */}
+      <Card className="p-5">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-semibold text-slate-900">{tabs.find((t) => t.key === tab)?.label}</h3>
+          <Button size="sm" onClick={() => openCreate(tab)}>
+            <Plus className="w-4 h-4" /> Add
+          </Button>
+        </div>
+
+        {tab === 'departments' && (
+          <div className="space-y-2">
+            {departments.map((d) => (
+              <div key={d.id} className="flex items-center justify-between p-3 rounded-lg bg-slate-50">
+                <div>
+                  <p className="text-sm font-medium text-slate-900">{d.name}</p>
+                  <p className="text-xs text-slate-400">{d.code}</p>
+                </div>
+                <div className="flex gap-1">
+                  <button onClick={() => openEdit('departments', d.id, d)} className="p-2 text-slate-500 hover:bg-slate-200 rounded-lg">
+                    <Pencil className="w-4 h-4" />
+                  </button>
+                  <button onClick={() => handleDelete('departments', d.id)} className="p-2 text-red-500 hover:bg-red-100 rounded-lg">
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            ))}
+            {departments.length === 0 && <p className="text-sm text-slate-400 py-4 text-center">No departments yet</p>}
+          </div>
+        )}
+
+        {tab === 'areas' && (
+          <div className="space-y-2">
+            {areas.map((a) => (
+              <div key={a.id} className="flex items-center justify-between p-3 rounded-lg bg-slate-50">
+                <div>
+                  <p className="text-sm font-medium text-slate-900">{a.name}</p>
+                  <p className="text-xs text-slate-400">{a.department?.name ?? '-'}</p>
+                </div>
+                <div className="flex gap-1">
+                  <button onClick={() => openEdit('areas', a.id, a)} className="p-2 text-slate-500 hover:bg-slate-200 rounded-lg">
+                    <Pencil className="w-4 h-4" />
+                  </button>
+                  <button onClick={() => handleDelete('areas', a.id)} className="p-2 text-red-500 hover:bg-red-100 rounded-lg">
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            ))}
+            {areas.length === 0 && <p className="text-sm text-slate-400 py-4 text-center">No areas yet</p>}
+          </div>
+        )}
+
+        {tab === 'equipment' && (
+          <div className="space-y-2">
+            {equipment.map((eq) => (
+              <div key={eq.id} className="flex items-center justify-between p-3 rounded-lg bg-slate-50">
+                <div>
+                  <p className="text-sm font-medium text-slate-900">{eq.name}</p>
+                  <p className="text-xs text-slate-400">
+                    {eq.area?.name ?? '-'} • {eq.area?.department?.name ?? '-'}
+                  </p>
+                </div>
+                <div className="flex gap-1">
+                  <button onClick={() => openEdit('equipment', eq.id, eq)} className="p-2 text-slate-500 hover:bg-slate-200 rounded-lg">
+                    <Pencil className="w-4 h-4" />
+                  </button>
+                  <button onClick={() => handleDelete('equipment', eq.id)} className="p-2 text-red-500 hover:bg-red-100 rounded-lg">
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            ))}
+            {equipment.length === 0 && <p className="text-sm text-slate-400 py-4 text-center">No equipment yet</p>}
+          </div>
+        )}
+
+        {tab === 'users' && (
+          <div className="space-y-2">
+            {users.map((u) => (
+              <div key={u.id} className="flex items-center justify-between p-3 rounded-lg bg-slate-50">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <p className="text-sm font-medium text-slate-900">{u.full_name || '(no name)'}</p>
+                    <Badge className={
+                      u.role === 'admin' ? 'bg-red-100 text-red-700 border-red-200' :
+                      u.role === 'spv' ? 'bg-blue-100 text-blue-700 border-blue-200' :
+                      u.role === 'inventory' ? 'bg-teal-100 text-teal-700 border-teal-200' :
+                      'bg-slate-100 text-slate-600 border-slate-200'
+                    }>
+                      {ROLE_LABELS[u.role]}
+                    </Badge>
+                    {!u.is_active && <Badge className="bg-gray-200 text-gray-500 border-gray-300">Inactive</Badge>}
+                  </div>
+                  <p className="text-xs text-slate-400 mt-0.5 truncate">{u.username ? `@${u.username}` : u.id}</p>
+                </div>
+                <div className="flex gap-1 flex-shrink-0">
+                  <button onClick={() => openEdit('users', u.id, u)} className="p-2 text-slate-500 hover:bg-slate-200 rounded-lg">
+                    <Pencil className="w-4 h-4" />
+                  </button>
+                  {u.id !== profile?.id && (
+                    <button onClick={() => handleDelete('users', u.id)} className="p-2 text-red-500 hover:bg-red-100 rounded-lg">
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+            {users.length === 0 && <p className="text-sm text-slate-400 py-4 text-center">No users yet</p>}
+          </div>
+        )}
+      </Card>
+
+      {/* Form Modal */}
+      <Modal
+        open={showForm}
+        onClose={() => setShowForm(false)}
+        title={editing?.id ? `Edit ${editing.type.slice(0, -1)}` : `Add ${editing?.type.slice(0, -1)}`}
+      >
+        <div className="space-y-4">
+          {editing?.type === 'departments' && (
+            <>
+              <div>
+                <Label>Name *</Label>
+                <Input value={deptForm.name} onChange={(e) => setDeptForm((f) => ({ ...f, name: e.target.value }))} placeholder="MTC" />
+              </div>
+              <div>
+                <Label>Code *</Label>
+                <Input value={deptForm.code} onChange={(e) => setDeptForm((f) => ({ ...f, code: e.target.value }))} placeholder="MTC" />
+              </div>
+            </>
+          )}
+
+          {editing?.type === 'areas' && (
+            <>
+              <div>
+                <Label>Department *</Label>
+                <Select value={areaForm.department_id} onChange={(e) => setAreaForm((f) => ({ ...f, department_id: e.target.value }))}>
+                  <option value="">Select department...</option>
+                  {departments.map((d) => (
+                    <option key={d.id} value={d.id}>{d.name}</option>
+                  ))}
+                </Select>
+              </div>
+              <div>
+                <Label>Area Name *</Label>
+                <Input value={areaForm.name} onChange={(e) => setAreaForm((f) => ({ ...f, name: e.target.value }))} placeholder="Plant 1 Area A" />
+              </div>
+            </>
+          )}
+
+          {editing?.type === 'equipment' && (
+            <>
+              <div>
+                <Label>Area *</Label>
+                <Select value={equipForm.area_id} onChange={(e) => setEquipForm((f) => ({ ...f, area_id: e.target.value }))}>
+                  <option value="">Select area...</option>
+                  {areas.map((a) => (
+                    <option key={a.id} value={a.id}>{a.name} ({a.department?.name})</option>
+                  ))}
+                </Select>
+              </div>
+              <div>
+                <Label>Equipment Name *</Label>
+                <Input value={equipForm.name} onChange={(e) => setEquipForm((f) => ({ ...f, name: e.target.value }))} placeholder="Motor 1" />
+              </div>
+              <div>
+                <Label>Code</Label>
+                <Input value={equipForm.code} onChange={(e) => setEquipForm((f) => ({ ...f, code: e.target.value }))} placeholder="MTR-001" />
+              </div>
+            </>
+          )}
+
+          {editing?.type === 'users' && (
+            <>
+              {!editing.id && (
+                <div>
+                  <Label>Username *</Label>
+                  <Input value={userForm.username} onChange={(e) => setUserForm((f) => ({ ...f, username: e.target.value }))} placeholder="budi.teknisi" autoCapitalize="none" />
+                </div>
+              )}
+              <div>
+                <Label>Full Name *</Label>
+                <Input value={userForm.full_name} onChange={(e) => setUserForm((f) => ({ ...f, full_name: e.target.value }))} />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <Label>Role</Label>
+                  <Select value={userForm.role} onChange={(e) => setUserForm((f) => ({ ...f, role: e.target.value as Role }))}>
+                    <option value="admin">Admin</option>
+                    <option value="spv">SPV</option>
+                    <option value="teknisi">Teknisi</option>
+                    <option value="inventory">Inventory Control</option>
+                  </Select>
+                </div>
+                <div>
+                  <Label>Department</Label>
+                  <Select value={userForm.department_id} onChange={(e) => setUserForm((f) => ({ ...f, department_id: e.target.value }))}>
+                    <option value="">None</option>
+                    {departments.map((d) => (
+                      <option key={d.id} value={d.id}>{d.name}</option>
+                    ))}
+                  </Select>
+                </div>
+              </div>
+              <div>
+                <Label>{editing.id ? 'Password baru (kosongkan jika tidak diganti)' : 'Password *'}</Label>
+                <Input type="password" value={userForm.password} onChange={(e) => setUserForm((f) => ({ ...f, password: e.target.value }))} placeholder="Min 6 karakter, huruf dan angka" autoComplete="new-password" />
+              </div>
+            </>
+          )}
+
+          <div className="flex justify-end gap-3 pt-2">
+            <Button variant="secondary" onClick={() => setShowForm(false)}>Cancel</Button>
+            <Button onClick={handleSave} disabled={acting}>
+              {acting ? 'Saving...' : 'Save'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+    </div>
+  );
+}
