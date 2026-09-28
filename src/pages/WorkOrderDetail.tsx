@@ -177,65 +177,32 @@ export default function WorkOrderDetail({
     if (!wo || !selectedPart) return;
     const part = spareParts.find((p) => p.id === selectedPart);
     if (!part) return;
+    if (partQty <= 0) { alert('Quantity harus lebih besar dari 0.'); return; }
+    if (partQty > part.current_stock) { alert(`Stok tidak mencukupi. Tersedia ${part.current_stock} ${part.unit}.`); return; }
 
     setActing(true);
-    await supabase.from('work_order_parts').insert({
-      work_order_id: wo.id,
-      spare_part_id: selectedPart,
-      quantity: partQty,
+    const { error } = await supabase.rpc('consume_work_order_part', {
+      p_work_order_id: wo.id,
+      p_spare_part_id: selectedPart,
+      p_quantity: partQty,
     });
-
-    // Create Stock Out transaction
-    await supabase.from('inventory_transactions').insert({
-      spare_part_id: selectedPart,
-      type: 'stock_out',
-      quantity: partQty,
-      balance_after: part.current_stock - partQty,
-      reference: wo.wo_number,
-      notes: `Used on ${wo.wo_number}`,
-      work_order_id: wo.id,
-      created_by: profile!.id,
-    });
-
-    // Update stock
-    await supabase
-      .from('spare_parts')
-      .update({ current_stock: part.current_stock - partQty, updated_at: new Date().toISOString() })
-      .eq('id', selectedPart);
-
-    await logHistory(wo.id, wo.status, 'Spare part added', `${part.name} x${partQty}`);
-    setSelectedPart('');
-    setPartQty(1);
+    if (error) alert('Gagal menggunakan spare part: ' + error.message);
+    else {
+      await logHistory(wo.id, wo.status, 'Spare part added', `${part.name} x${partQty}`);
+      setSelectedPart('');
+      setPartQty(1);
+      await loadData();
+    }
     setActing(false);
-    loadData();
   }
 
-  async function handleRemovePart(partId: string, sparePartId: string, qty: number) {
+  async function handleRemovePart(partId: string, _sparePartId: string, _qty: number) {
     if (!wo) return;
     setActing(true);
-    await supabase.from('work_order_parts').delete().eq('id', partId);
-
-    // Reverse stock
-    const part = spareParts.find((p) => p.id === sparePartId);
-    if (part) {
-      await supabase.from('inventory_transactions').insert({
-        spare_part_id: sparePartId,
-        type: 'stock_in',
-        quantity: qty,
-        balance_after: part.current_stock + qty,
-        reference: wo.wo_number,
-        notes: `Returned from ${wo.wo_number} (part removed)`,
-        work_order_id: wo.id,
-        created_by: profile!.id,
-      });
-      await supabase
-        .from('spare_parts')
-        .update({ current_stock: part.current_stock + qty, updated_at: new Date().toISOString() })
-        .eq('id', sparePartId);
-    }
-
+    const { error } = await supabase.rpc('return_work_order_part', { p_work_order_part_id: partId });
+    if (error) alert('Gagal mengembalikan spare part: ' + error.message);
+    else await loadData();
     setActing(false);
-    loadData();
   }
 
   async function handleIntervention() {

@@ -34,7 +34,6 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
     unit: 'pcs',
     min_stock: 0,
     max_stock: 0,
-    current_stock: 0,
     location: '',
   });
 
@@ -90,7 +89,7 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
 
   function openCreate() {
     setEditing(null);
-    setForm({ code: '', name: '', category: '', unit: '', min_stock: 0, max_stock: 0, current_stock: 0, location: '' });
+    setForm({ code: '', name: '', category: '', unit: '', min_stock: 0, max_stock: 0, location: '' });
     setShowForm(true);
   }
 
@@ -103,7 +102,6 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
       unit: part.unit,
       min_stock: part.min_stock,
       max_stock: part.max_stock,
-      current_stock: part.current_stock,
       location: part.location ?? '',
     });
     setShowForm(true);
@@ -127,7 +125,6 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
         unit: form.unit,
         min_stock: form.min_stock,
         max_stock: form.max_stock,
-        current_stock: form.current_stock,
         location: form.location || null,
         updated_at: new Date().toISOString(),
       };
@@ -153,7 +150,6 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
         unit: form.unit,
         min_stock: form.min_stock,
         max_stock: form.max_stock,
-        current_stock: form.current_stock,
         location: form.location || null,
       };
       const { error } = await supabase.from('spare_parts').insert(data);
@@ -177,41 +173,32 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
 
   async function handleTransaction() {
     if (!showTx || !profile) return;
+    if (txForm.quantity <= 0) {
+      alert('Quantity harus lebih besar dari 0.');
+      return;
+    }
+    if (txForm.type === 'stock_out' && txForm.quantity > showTx.current_stock) {
+      alert(`Stok tidak mencukupi. Stok tersedia: ${showTx.current_stock} ${showTx.unit}.`);
+      return;
+    }
     setActing(true);
-
-    let newStock = showTx.current_stock;
-    if (txForm.type === 'stock_in') newStock += txForm.quantity;
-    else if (txForm.type === 'stock_out') newStock -= txForm.quantity;
-    else if (txForm.type === 'adjustment' || txForm.type === 'opname') newStock = txForm.quantity;
-
-    await supabase.from('inventory_transactions').insert({
-      spare_part_id: showTx.id,
-      type: txForm.type,
-      quantity: txForm.quantity,
-      balance_after: newStock,
-      reference: txForm.reference || null,
-      notes: txForm.notes || null,
-      created_by: profile.id,
+    const { error } = await supabase.rpc('apply_inventory_transaction', {
+      p_spare_part_id: showTx.id,
+      p_type: txForm.type,
+      p_quantity: txForm.quantity,
+      p_reference: txForm.reference || null,
+      p_notes: txForm.notes || null,
+      p_work_order_id: null,
+      p_source: txForm.type === 'stock_in' ? 'Spare Parts' : null,
+      p_destination: txForm.type === 'stock_out' ? 'Spare Parts' : null,
     });
-
-    await supabase
-      .from('spare_parts')
-      .update({ current_stock: newStock, updated_at: new Date().toISOString() })
-      .eq('id', showTx.id);
-
-    // Activity log
-    await supabase.from('activity_log').insert({
-      user_id: profile.id,
-      action: `inventory_${txForm.type}`,
-      entity_type: 'spare_part',
-      entity_id: showTx.id,
-      details: `${showTx.code}: ${txForm.type} qty ${txForm.quantity}`,
-    });
-
+    if (error) alert('Transaksi gagal: ' + error.message);
+    else {
+      setShowTx(null);
+      setTxForm({ type: 'stock_in', quantity: 0, reference: '', notes: '' });
+      await loadParts();
+    }
     setActing(false);
-    setShowTx(null);
-    setTxForm({ type: 'stock_in', quantity: 0, reference: '', notes: '' });
-    loadParts();
   }
 
   if (loading) return <Spinner />;
@@ -377,7 +364,7 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
           <p className="text-xs text-slate-400">
             Kategori, satuan, dan lokasi baru bisa ditambahkan lewat menu Master Data Inventory.
           </p>
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-2 gap-4">
             <div>
               <Label>Min Stock</Label>
               <Input type="number" min={0} value={form.min_stock} onChange={(e) => setForm((f) => ({ ...f, min_stock: Number(e.target.value) }))} />
@@ -385,10 +372,6 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
             <div>
               <Label>Max Stock</Label>
               <Input type="number" min={0} value={form.max_stock} onChange={(e) => setForm((f) => ({ ...f, max_stock: Number(e.target.value) }))} />
-            </div>
-            <div>
-              <Label>Current Stock</Label>
-              <Input type="number" min={0} value={form.current_stock} onChange={(e) => setForm((f) => ({ ...f, current_stock: Number(e.target.value) }))} />
             </div>
           </div>
           <div className="flex justify-end gap-3 pt-2">

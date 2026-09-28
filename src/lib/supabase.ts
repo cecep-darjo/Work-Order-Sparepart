@@ -97,6 +97,11 @@ export type InventoryTransaction = {
   work_order_id: string | null;
   created_by: string;
   created_at: string;
+  transaction_no?: string | null;
+  stock_before?: number | null;
+  source?: string | null;
+  destination?: string | null;
+  reversed_transaction_id?: string | null;
   spare_part?: SparePart;
 };
 
