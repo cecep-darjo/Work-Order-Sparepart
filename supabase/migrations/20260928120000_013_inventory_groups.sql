@@ -9,4 +9,4 @@ CREATE TABLE inventory_groups (
 );
 
 -- Add group_id column to inventory table
-ALTER TABLE inventory ADD COLUMN group_id INT REFERENCES inventory_groups(id);
+ALTER TABLE spare_parts ADD COLUMN group_id INT REFERENCES inventory_groups(id);
