@@ -57,7 +57,8 @@ function AppContent() {
           {page === 'spareparts' && <SpareParts />}
           {page === 'transactions' && <Transactions />}
           {page === 'inventory' && <SpareParts lowStockOnly />}
-          {page === 'admin' && <AdminPanel />}
+          {page === 'master_wo' && <AdminPanel scope="wo" />}
+          {page === 'master_inventory' && <AdminPanel scope="inventory" />}
           {page === 'activity' && <ActivityLogPage />}
         </>
       )}

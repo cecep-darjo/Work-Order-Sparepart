@@ -20,7 +20,8 @@ export type PageKey =
   | 'inventory'
   | 'spareparts'
   | 'transactions'
-  | 'admin'
+  | 'master_wo'
+  | 'master_inventory'
   | 'activity';
 
 const NAV_ITEMS: {
@@ -34,7 +35,8 @@ const NAV_ITEMS: {
   { key: 'spareparts', label: 'Spare Parts', icon: Package, roles: ['admin', 'inventory'] },
   { key: 'transactions', label: 'Inventory Transactions', icon: Boxes, roles: ['admin', 'inventory'] },
   { key: 'inventory', label: 'Low Stock Alerts', icon: Package, roles: ['admin', 'inventory'] },
-  { key: 'admin', label: 'Master Data', icon: Settings, roles: ['admin'] },
+  { key: 'master_wo', label: 'Master Data WO', icon: Settings, roles: ['admin'] },
+  { key: 'master_inventory', label: 'Master Data Inventory', icon: Settings, roles: ['admin'] },
   { key: 'activity', label: 'Activity Log', icon: History, roles: ['admin'] },
 ];
 

@@ -6,8 +6,10 @@ import {
   STATUS_COLORS,
   PRIORITY_LABELS,
   PRIORITY_COLORS,
-  ROLE_LABELS,
   type WorkOrder,
+  type Department,
+  type Area,
+  type Equipment,
   type WorkOrderHistory,
   type WorkOrderPart,
   type Profile,
@@ -15,7 +17,7 @@ import {
   type WOStatus,
 } from '@/lib/supabase';
 import { Card, Badge, Button, Select, Textarea, Label, Spinner, Modal, Input } from '@/components/ui';
-import { ArrowLeft, UserCog, Play, Pause, CheckCircle2, RotateCcw, Lock, Unlock, Package, Plus, Trash2, History as HistoryIcon } from 'lucide-react';
+import { ArrowLeft, UserCog, Play, Pause, CheckCircle2, RotateCcw, Lock, Unlock, Package, Plus, Trash2, Pencil, History as HistoryIcon } from 'lucide-react';
 
 export default function WorkOrderDetail({
   woId,
@@ -46,6 +48,23 @@ export default function WorkOrderDetail({
   const [showIntervention, setShowIntervention] = useState(false);
   const [interventionStatus, setInterventionStatus] = useState<WOStatus>('new');
   const [acting, setActing] = useState(false);
+
+  // Edit / delete (admin)
+  const [showEdit, setShowEdit] = useState(false);
+  const [editForm, setEditForm] = useState({
+    department_id: '',
+    area_id: '',
+    equipment_id: '',
+    problem_description: '',
+    priority: 'medium' as WorkOrder['priority'],
+    spv_id: '',
+    technician_id: '',
+  });
+  const [deptList, setDeptList] = useState<Department[]>([]);
+  const [areaList, setAreaList] = useState<Area[]>([]);
+  const [equipList, setEquipList] = useState<Equipment[]>([]);
+  const [showDelete, setShowDelete] = useState(false);
+  const [deleteReason, setDeleteReason] = useState('');
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -240,6 +259,116 @@ export default function WorkOrderDetail({
       await loadData();
     }
     setActing(false);
+  }
+
+  async function loadEditAreas(deptId: string) {
+    const { data } = await supabase.from('areas').select('*').eq('department_id', deptId).order('name');
+    setAreaList((data as Area[]) ?? []);
+  }
+
+  async function loadEditEquipment(areaId: string) {
+    const { data } = await supabase.from('equipment').select('*').eq('area_id', areaId).order('name');
+    setEquipList((data as Equipment[]) ?? []);
+  }
+
+  async function openEdit() {
+    if (!wo) return;
+    setEditForm({
+      department_id: wo.department_id,
+      area_id: wo.area_id ?? '',
+      equipment_id: wo.equipment_id ?? '',
+      problem_description: wo.problem_description,
+      priority: wo.priority,
+      spv_id: wo.spv_id ?? '',
+      technician_id: wo.technician_id ?? '',
+    });
+    setAreaList([]);
+    setEquipList([]);
+    setShowEdit(true);
+    const { data: depts } = await supabase.from('departments').select('*').order('name');
+    setDeptList((depts as Department[]) ?? []);
+    await loadEditAreas(wo.department_id);
+    if (wo.area_id) await loadEditEquipment(wo.area_id);
+  }
+
+  async function handleEditDepartment(deptId: string) {
+    setEditForm((f) => ({ ...f, department_id: deptId, area_id: '', equipment_id: '' }));
+    setEquipList([]);
+    if (deptId) await loadEditAreas(deptId);
+    else setAreaList([]);
+  }
+
+  async function handleEditArea(areaId: string) {
+    setEditForm((f) => ({ ...f, area_id: areaId, equipment_id: '' }));
+    if (areaId) await loadEditEquipment(areaId);
+    else setEquipList([]);
+  }
+
+  async function handleSaveEdit() {
+    if (!wo || !profile) return;
+    if (!editForm.department_id || !editForm.problem_description.trim()) {
+      alert('Departemen dan deskripsi masalah wajib diisi.');
+      return;
+    }
+    setActing(true);
+
+    const updateData: Record<string, unknown> = {
+      department_id: editForm.department_id,
+      area_id: editForm.area_id || null,
+      equipment_id: editForm.equipment_id || null,
+      problem_description: editForm.problem_description.trim(),
+      priority: editForm.priority,
+      spv_id: editForm.spv_id || null,
+      technician_id: editForm.technician_id || null,
+      updated_at: new Date().toISOString(),
+    };
+    // Sama seperti alur pembuatan/assignment: WO baru yang diberi teknisi menjadi 'assigned'.
+    let newStatus: WOStatus = wo.status;
+    if (wo.status === 'new' && editForm.technician_id && !wo.technician_id) {
+      updateData.status = 'assigned';
+      newStatus = 'assigned';
+    }
+
+    const { error } = await supabase.from('work_orders').update(updateData).eq('id', wo.id);
+    if (error) {
+      alert('Gagal menyimpan perubahan: ' + error.message);
+      setActing(false);
+      return;
+    }
+
+    const changes: string[] = [];
+    if (editForm.department_id !== wo.department_id) changes.push('department');
+    if ((editForm.area_id || null) !== wo.area_id) changes.push('area');
+    if ((editForm.equipment_id || null) !== wo.equipment_id) changes.push('equipment');
+    if (editForm.priority !== wo.priority) changes.push(`priority ${wo.priority} -> ${editForm.priority}`);
+    if (editForm.problem_description.trim() !== wo.problem_description) changes.push('problem description');
+    if ((editForm.spv_id || null) !== wo.spv_id) changes.push('SPV');
+    if ((editForm.technician_id || null) !== wo.technician_id) changes.push('technician');
+    const summary = changes.length ? `Changed: ${changes.join(', ')}` : 'No field changed';
+
+    await logHistory(wo.id, newStatus, 'WO edited by admin', summary);
+    await logActivity('edit_wo', `${wo.wo_number}: edited by admin (${summary})`);
+    setShowEdit(false);
+    await loadData();
+    setActing(false);
+  }
+
+  async function handleDeleteWO() {
+    if (!wo || !deleteReason.trim()) return;
+    setActing(true);
+    const { error } = await supabase.rpc('admin_delete_work_order', {
+      p_wo_id: wo.id,
+      p_reason: deleteReason.trim(),
+    });
+    if (error) {
+      alert('Gagal menghapus WO: ' + error.message);
+      setActing(false);
+      return;
+    }
+    setActing(false);
+    setShowDelete(false);
+    setDeleteReason('');
+    onBack();
   }
 
   async function handleReopen() {
@@ -521,6 +650,9 @@ export default function WorkOrderDetail({
             <Lock className="w-4 h-4" /> Admin Controls
           </h3>
           <div className="flex flex-wrap gap-2">
+            <Button variant="secondary" size="sm" onClick={openEdit} disabled={acting}>
+              <Pencil className="w-4 h-4" /> Edit WO
+            </Button>
             <Button variant="secondary" size="sm" onClick={() => setShowIntervention(true)}>
               Change Status (Intervention)
             </Button>
@@ -534,6 +666,9 @@ export default function WorkOrderDetail({
                 <Lock className="w-4 h-4" /> Close WO
               </Button>
             )}
+            <Button variant="danger" size="sm" onClick={() => setShowDelete(true)} disabled={acting}>
+              <Trash2 className="w-4 h-4" /> Delete WO
+            </Button>
           </div>
         </Card>
       )}
@@ -567,6 +702,113 @@ export default function WorkOrderDetail({
           </div>
         )}
       </Card>
+
+      {/* Edit modal */}
+      <Modal open={showEdit} onClose={() => setShowEdit(false)} title={`Edit ${wo.wo_number}`} maxWidth="max-w-2xl">
+        <div className="space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <Label>Department *</Label>
+              <Select value={editForm.department_id} onChange={(e) => handleEditDepartment(e.target.value)}>
+                <option value="">Select department...</option>
+                {deptList.map((d) => (
+                  <option key={d.id} value={d.id}>{d.name}</option>
+                ))}
+              </Select>
+            </div>
+            <div>
+              <Label>Priority</Label>
+              <Select value={editForm.priority} onChange={(e) => setEditForm((f) => ({ ...f, priority: e.target.value as WorkOrder['priority'] }))}>
+                {Object.keys(PRIORITY_LABELS).map((k) => (
+                  <option key={k} value={k}>{PRIORITY_LABELS[k]}</option>
+                ))}
+              </Select>
+            </div>
+            <div>
+              <Label>Area</Label>
+              <Select value={editForm.area_id} onChange={(e) => handleEditArea(e.target.value)}>
+                <option value="">None</option>
+                {areaList.map((a) => (
+                  <option key={a.id} value={a.id}>{a.name}</option>
+                ))}
+              </Select>
+            </div>
+            <div>
+              <Label>Equipment</Label>
+              <Select value={editForm.equipment_id} onChange={(e) => setEditForm((f) => ({ ...f, equipment_id: e.target.value }))}>
+                <option value="">None</option>
+                {equipList.map((q) => (
+                  <option key={q.id} value={q.id}>{q.name}</option>
+                ))}
+              </Select>
+            </div>
+            <div>
+              <Label>SPV</Label>
+              <Select value={editForm.spv_id} onChange={(e) => setEditForm((f) => ({ ...f, spv_id: e.target.value }))}>
+                <option value="">None</option>
+                {(wo.spv && !spvList.some((x) => x.id === wo.spv!.id) ? [wo.spv, ...spvList] : spvList).map((x) => (
+                  <option key={x.id} value={x.id}>{x.full_name}</option>
+                ))}
+              </Select>
+            </div>
+            <div>
+              <Label>Technician</Label>
+              <Select value={editForm.technician_id} onChange={(e) => setEditForm((f) => ({ ...f, technician_id: e.target.value }))}>
+                <option value="">None</option>
+                {(wo.technician && !techList.some((x) => x.id === wo.technician!.id) ? [wo.technician, ...techList] : techList).map((x) => (
+                  <option key={x.id} value={x.id}>{x.full_name}</option>
+                ))}
+              </Select>
+            </div>
+          </div>
+          <div>
+            <Label>Problem Description *</Label>
+            <Textarea
+              rows={4}
+              value={editForm.problem_description}
+              onChange={(e) => setEditForm((f) => ({ ...f, problem_description: e.target.value }))}
+            />
+          </div>
+          <p className="text-xs text-slate-400">
+            Nomor WO tidak berubah walau departemen diganti. Untuk mengubah status gunakan Change Status.
+            Perubahan dicatat di History dan Activity Log.
+          </p>
+          <div className="flex justify-end gap-3">
+            <Button variant="secondary" onClick={() => setShowEdit(false)}>Cancel</Button>
+            <Button onClick={handleSaveEdit} disabled={acting || !editForm.department_id || !editForm.problem_description.trim()}>
+              {acting ? 'Saving...' : 'Save Changes'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Delete modal */}
+      <Modal open={showDelete} onClose={() => setShowDelete(false)} title="Delete Work Order">
+        <div className="space-y-4">
+          <p className="text-sm text-slate-700">
+            Hapus <span className="font-semibold">{wo.wo_number}</span>? Riwayat dan daftar spare part WO ini akan ikut terhapus.
+            {parts.length > 0 && ' Spare part yang sudah terpakai akan dikembalikan ke stok.'} Tindakan ini tidak bisa dibatalkan.
+          </p>
+          <div>
+            <Label>Alasan penghapusan *</Label>
+            <Textarea
+              rows={3}
+              value={deleteReason}
+              onChange={(e) => setDeleteReason(e.target.value)}
+              placeholder="Mis. WO dobel / salah input..."
+            />
+          </div>
+          <div className="flex justify-end gap-3">
+            <Button variant="secondary" onClick={() => setShowDelete(false)}>Cancel</Button>
+            <Button variant="danger" onClick={handleDeleteWO} disabled={acting || !deleteReason.trim()}>
+              {acting ? 'Deleting...' : 'Delete WO'}
+            </Button>
+          </div>
+          <p className="text-xs text-slate-400">
+            Penghapusan dicatat di Activity Log beserta nama Anda dan alasan di atas.
+          </p>
+        </div>
+      </Modal>
 
       {/* Intervention modal */}
       <Modal open={showIntervention} onClose={() => setShowIntervention(false)} title="Admin Intervention">

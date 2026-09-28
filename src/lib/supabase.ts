@@ -17,6 +17,27 @@ export const supabase = createClient(
   }
 );
 
+export interface PartCategory {
+  id: string;
+  code: string;
+  name: string;
+  created_at: string;
+}
+
+export interface UnitOfMeasure {
+  id: string;
+  code: string;
+  name: string;
+  created_at: string;
+}
+
+export interface PartLocation {
+  id: string;
+  code: string;
+  name: string;
+  created_at: string;
+}
+
 export type Role = 'admin' | 'spv' | 'teknisi' | 'inventory';
 
 export type Profile = {

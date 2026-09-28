@@ -8,25 +8,43 @@ import {
   type Area,
   type Equipment,
   type Profile,
+  type PartCategory,
+  type UnitOfMeasure,
+  type PartLocation,
 } from '@/lib/supabase';
 import { normalizeUsername, validatePassword, validateUsername } from '@/lib/authUsername';
 import { Card, Badge, Button, Input, Select, Label, Modal, Spinner } from '@/components/ui';
-import { Building2, MapPin, Cpu, Users, Plus, Pencil, Trash2 } from 'lucide-react';
+import { Building2, MapPin, Cpu, Users, Plus, Pencil, Trash2, Tag, Ruler, Warehouse } from 'lucide-react';
 
-type Tab = 'departments' | 'areas' | 'equipment' | 'users';
+type Tab = 'departments' | 'areas' | 'equipment' | 'users' | 'categories' | 'units' | 'locations';
+type MasterScope = 'wo' | 'inventory';
+type SimpleMaster = 'categories' | 'units' | 'locations';
+const WO_TABS: Tab[] = ['departments', 'areas', 'equipment', 'users'];
+const INVENTORY_TABS: Tab[] = ['categories', 'units', 'locations'];
+const SIMPLE_TABLE: Record<SimpleMaster, string> = {
+  categories: 'part_categories',
+  units: 'units_of_measure',
+  locations: 'part_locations',
+};
+function isSimpleMaster(t: Tab): t is SimpleMaster {
+  return t === 'categories' || t === 'units' || t === 'locations';
+}
 
-export default function AdminPanel() {
+export default function AdminPanel({ scope }: { scope: MasterScope }) {
   const { profile } = useAuth();
-  const [tab, setTab] = useState<Tab>('departments');
+  const [tab, setTab] = useState<Tab>(scope === 'wo' ? 'departments' : 'categories');
   const [loading, setLoading] = useState(true);
 
   const [departments, setDepartments] = useState<Department[]>([]);
   const [areas, setAreas] = useState<(Area & { department?: Department })[]>([]);
   const [equipment, setEquipment] = useState<(Equipment & { area?: Area & { department?: Department } })[]>([]);
   const [users, setUsers] = useState<Profile[]>([]);
+  const [categories, setCategories] = useState<PartCategory[]>([]);
+  const [units, setUnits] = useState<UnitOfMeasure[]>([]);
+  const [locations, setLocations] = useState<PartLocation[]>([]);
 
   const [showForm, setShowForm] = useState(false);
-  const [editing, setEditing] = useState<{ type: string; id?: string; data?: Record<string, unknown> } | null>(null);
+  const [editing, setEditing] = useState<{ type: Tab; id?: string; data?: Record<string, unknown> } | null>(null);
   const [acting, setActing] = useState(false);
 
   // Form state
@@ -40,23 +58,38 @@ export default function AdminPanel() {
     department_id: '',
     password: '',
   });
+  const [simpleForm, setSimpleForm] = useState({ name: '', code: '' });
 
   useEffect(() => {
+    setTab(scope === 'wo' ? 'departments' : 'categories');
     loadAll();
-  }, []);
+  }, [scope]);
 
   async function loadAll() {
     setLoading(true);
-    const [{ data: d }, { data: a }, { data: e }, { data: u }] = await Promise.all([
-      supabase.from('departments').select('*').order('name'),
-      supabase.from('areas').select('*, department:departments(*)').order('name'),
-      supabase.from('equipment').select('*, area:areas(*, department:departments(*))').order('name'),
-      supabase.from('profiles').select('*').order('full_name'),
-    ]);
-    setDepartments((d as Department[]) ?? []);
-    setAreas((a as unknown as (Area & { department?: Department })[]) ?? []);
-    setEquipment((e as unknown as (Equipment & { area?: Area & { department?: Department } })[]) ?? []);
-    setUsers((u as Profile[]) ?? []);
+
+    if (scope === 'wo') {
+      const [{ data: d }, { data: a }, { data: e }, { data: u }] = await Promise.all([
+        supabase.from('departments').select('*').order('name'),
+        supabase.from('areas').select('*, department:departments(*)').order('name'),
+        supabase.from('equipment').select('*, area:areas(*, department:departments(*))').order('name'),
+        supabase.from('profiles').select('*').order('full_name'),
+      ]);
+      setDepartments((d as Department[]) ?? []);
+      setAreas((a as unknown as (Area & { department?: Department })[]) ?? []);
+      setEquipment((e as unknown as (Equipment & { area?: Area & { department?: Department } })[]) ?? []);
+      setUsers((u as Profile[]) ?? []);
+    } else {
+      const [{ data: cat }, { data: un }, { data: loc }] = await Promise.all([
+        supabase.from('part_categories').select('*').order('name'),
+        supabase.from('units_of_measure').select('*').order('name'),
+        supabase.from('part_locations').select('*').order('name'),
+      ]);
+      setCategories((cat as PartCategory[]) ?? []);
+      setUnits((un as UnitOfMeasure[]) ?? []);
+      setLocations((loc as PartLocation[]) ?? []);
+    }
+
     setLoading(false);
   }
 
@@ -65,6 +98,7 @@ export default function AdminPanel() {
     if (type === 'areas') setAreaForm({ department_id: '', name: '' });
     if (type === 'equipment') setEquipForm({ area_id: '', name: '', code: '' });
     if (type === 'users') setUserForm({ username: '', full_name: '', role: 'teknisi', department_id: '', password: '' });
+    if (isSimpleMaster(type)) setSimpleForm({ name: '', code: '' });
     setEditing({ type });
     setShowForm(true);
   }
@@ -82,6 +116,7 @@ export default function AdminPanel() {
         password: '',
       });
     }
+    if (isSimpleMaster(type)) setSimpleForm({ name: data.name as string, code: data.code as string });
     setEditing({ type, id, data });
     setShowForm(true);
   }
@@ -163,6 +198,22 @@ export default function AdminPanel() {
           return;
         }
       }
+    } else if (isSimpleMaster(editing.type)) {
+      const table = SIMPLE_TABLE[editing.type];
+      if (!simpleForm.name.trim() || !simpleForm.code.trim()) {
+        alert('Nama dan kode wajib diisi.');
+        setActing(false);
+        return;
+      }
+      const payload = { name: simpleForm.name.trim(), code: simpleForm.code.trim().toUpperCase() };
+      const { error } = editing.id
+        ? await supabase.from(table).update(payload).eq('id', editing.id)
+        : await supabase.from(table).insert(payload);
+      if (error) {
+        alert(error.message);
+        setActing(false);
+        return;
+      }
     }
 
     // Log activity
@@ -186,6 +237,7 @@ export default function AdminPanel() {
     if (type === 'areas') await supabase.from('areas').delete().eq('id', id);
     if (type === 'equipment') await supabase.from('equipment').delete().eq('id', id);
     if (type === 'users') await supabase.from('profiles').delete().eq('id', id);
+    if (isSimpleMaster(type)) await supabase.from(SIMPLE_TABLE[type]).delete().eq('id', id);
     loadAll();
   }
 
@@ -196,13 +248,17 @@ export default function AdminPanel() {
     { key: 'areas', label: 'Areas', icon: MapPin },
     { key: 'equipment', label: 'Equipment', icon: Cpu },
     { key: 'users', label: 'Users', icon: Users },
+    { key: 'categories', label: 'Categories', icon: Tag },
+    { key: 'units', label: 'Units', icon: Ruler },
+    { key: 'locations', label: 'Locations', icon: Warehouse },
   ];
+  const visibleTabs = scope === 'wo' ? WO_TABS : INVENTORY_TABS;
 
   return (
     <div className="space-y-4">
       {/* Tabs */}
       <div className="flex gap-1 p-1 bg-slate-100 rounded-lg w-fit overflow-x-auto">
-        {tabs.map((t) => {
+        {tabs.filter((t) => visibleTabs.includes(t.key)).map((t) => {
           const Icon = t.icon;
           return (
             <button
@@ -330,6 +386,31 @@ export default function AdminPanel() {
             {users.length === 0 && <p className="text-sm text-slate-400 py-4 text-center">No users yet</p>}
           </div>
         )}
+
+        {(tab === 'categories' || tab === 'units' || tab === 'locations') && (() => {
+          const list = tab === 'categories' ? categories : tab === 'units' ? units : locations;
+          return (
+            <div className="space-y-2">
+              {list.map((m) => (
+                <div key={m.id} className="flex items-center justify-between p-3 rounded-lg bg-slate-50">
+                  <div>
+                    <p className="text-sm font-medium text-slate-900">{m.name}</p>
+                    <p className="text-xs text-slate-400">{m.code}</p>
+                  </div>
+                  <div className="flex gap-1">
+                    <button onClick={() => openEdit(tab, m.id, m as unknown as Record<string, unknown>)} className="p-2 text-slate-500 hover:bg-slate-200 rounded-lg">
+                      <Pencil className="w-4 h-4" />
+                    </button>
+                    <button onClick={() => handleDelete(tab, m.id)} className="p-2 text-red-500 hover:bg-red-100 rounded-lg">
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+              {list.length === 0 && <p className="text-sm text-slate-400 py-4 text-center">Belum ada data</p>}
+            </div>
+          );
+        })()}
       </Card>
 
       {/* Form Modal */}
@@ -348,6 +429,20 @@ export default function AdminPanel() {
               <div>
                 <Label>Code *</Label>
                 <Input value={deptForm.code} onChange={(e) => setDeptForm((f) => ({ ...f, code: e.target.value }))} placeholder="MTC" />
+              </div>
+            </>
+          )}
+
+          {editing && isSimpleMaster(editing.type) && (
+            <>
+              <div>
+                <Label>Name *</Label>
+                <Input value={simpleForm.name} onChange={(e) => setSimpleForm((f) => ({ ...f, name: e.target.value }))} placeholder="Bearing" />
+              </div>
+              <div>
+                <Label>Code *</Label>
+                <Input value={simpleForm.code} onChange={(e) => setSimpleForm((f) => ({ ...f, code: e.target.value.toUpperCase() }))} placeholder="BRG" />
+                <p className="text-xs text-slate-400 mt-1">Kode ini dipakai sebagai awalan nomor kode part otomatis.</p>
               </div>
             </>
           )}

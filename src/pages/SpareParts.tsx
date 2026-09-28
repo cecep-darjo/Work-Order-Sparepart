@@ -4,6 +4,9 @@ import {
   supabase,
   stockStatus,
   type SparePart,
+  type PartCategory,
+  type UnitOfMeasure,
+  type PartLocation,
 } from '@/lib/supabase';
 import { Card, Badge, Button, Input, Select, Label, Modal, Textarea, Spinner, EmptyState } from '@/components/ui';
 import { Plus, Search, Pencil, Trash2, Package, AlertTriangle, TrendingUp, Sliders } from 'lucide-react';
@@ -20,6 +23,9 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
   const [editing, setEditing] = useState<SparePart | null>(null);
   const [showTx, setShowTx] = useState<SparePart | null>(null);
   const [acting, setActing] = useState(false);
+  const [categories, setCategories] = useState<PartCategory[]>([]);
+  const [units, setUnits] = useState<UnitOfMeasure[]>([]);
+  const [locations, setLocations] = useState<PartLocation[]>([]);
 
   const [form, setForm] = useState({
     code: '',
@@ -68,9 +74,23 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
     loadParts();
   }, [loadParts]);
 
+  useEffect(() => {
+    async function loadMasters() {
+      const [{ data: cat }, { data: un }, { data: loc }] = await Promise.all([
+        supabase.from('part_categories').select('*').order('name'),
+        supabase.from('units_of_measure').select('*').order('name'),
+        supabase.from('part_locations').select('*').order('name'),
+      ]);
+      setCategories((cat as PartCategory[]) ?? []);
+      setUnits((un as UnitOfMeasure[]) ?? []);
+      setLocations((loc as PartLocation[]) ?? []);
+    }
+    loadMasters();
+  }, []);
+
   function openCreate() {
     setEditing(null);
-    setForm({ code: '', name: '', category: '', unit: 'pcs', min_stock: 0, max_stock: 0, current_stock: 0, location: '' });
+    setForm({ code: '', name: '', category: '', unit: '', min_stock: 0, max_stock: 0, current_stock: 0, location: '' });
     setShowForm(true);
   }
 
@@ -90,23 +110,58 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
   }
 
   async function handleSave() {
+    if (!form.name.trim()) {
+      alert('Nama part wajib diisi.');
+      return;
+    }
+    if (!form.unit) {
+      alert('Satuan wajib dipilih.');
+      return;
+    }
     setActing(true);
-    const data = {
-      code: form.code,
-      name: form.name,
-      category: form.category || null,
-      unit: form.unit,
-      min_stock: form.min_stock,
-      max_stock: form.max_stock,
-      current_stock: form.current_stock,
-      location: form.location || null,
-      updated_at: new Date().toISOString(),
-    };
 
     if (editing) {
-      await supabase.from('spare_parts').update(data).eq('id', editing.id);
+      const data = {
+        name: form.name,
+        category: form.category || null,
+        unit: form.unit,
+        min_stock: form.min_stock,
+        max_stock: form.max_stock,
+        current_stock: form.current_stock,
+        location: form.location || null,
+        updated_at: new Date().toISOString(),
+      };
+      const { error } = await supabase.from('spare_parts').update(data).eq('id', editing.id);
+      if (error) {
+        alert('Gagal menyimpan: ' + error.message);
+        setActing(false);
+        return;
+      }
     } else {
-      await supabase.from('spare_parts').insert(data);
+      // Kode part dibuat otomatis di server: <KODE_KATEGORI>-00001 (atau SP-00001 tanpa kategori).
+      const categoryId = categories.find((c) => c.name === form.category)?.id ?? null;
+      const { data: code, error: codeError } = await supabase.rpc('next_part_code', { p_category_id: categoryId });
+      if (codeError || !code) {
+        alert('Gagal membuat kode part: ' + (codeError?.message ?? 'kode kosong'));
+        setActing(false);
+        return;
+      }
+      const data = {
+        code,
+        name: form.name,
+        category: form.category || null,
+        unit: form.unit,
+        min_stock: form.min_stock,
+        max_stock: form.max_stock,
+        current_stock: form.current_stock,
+        location: form.location || null,
+      };
+      const { error } = await supabase.from('spare_parts').insert(data);
+      if (error) {
+        alert('Gagal menyimpan: ' + error.message);
+        setActing(false);
+        return;
+      }
     }
 
     setActing(false);
@@ -272,12 +327,20 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
         <div className="space-y-4">
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <Label>Code *</Label>
-              <Input value={form.code} onChange={(e) => setForm((f) => ({ ...f, code: e.target.value }))} placeholder="SP-001" />
+              <Label>Code</Label>
+              <Input value={editing ? form.code : 'Dibuat otomatis saat disimpan'} disabled className="bg-slate-50 text-slate-400" />
             </div>
             <div>
-              <Label>Unit</Label>
-              <Input value={form.unit} onChange={(e) => setForm((f) => ({ ...f, unit: e.target.value }))} placeholder="pcs" />
+              <Label>Unit *</Label>
+              <Select value={form.unit} onChange={(e) => setForm((f) => ({ ...f, unit: e.target.value }))}>
+                <option value="">Select unit...</option>
+                {(form.unit && !units.some((u) => u.name === form.unit)
+                  ? [{ id: '__legacy_unit__', name: form.unit }, ...units]
+                  : units
+                ).map((u) => (
+                  <option key={u.id} value={u.name}>{u.name}</option>
+                ))}
+              </Select>
             </div>
           </div>
           <div>
@@ -287,13 +350,33 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
           <div className="grid grid-cols-2 gap-4">
             <div>
               <Label>Category</Label>
-              <Input value={form.category} onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))} placeholder="Bearing" />
+              <Select value={form.category} onChange={(e) => setForm((f) => ({ ...f, category: e.target.value }))}>
+                <option value="">None</option>
+                {(form.category && !categories.some((c) => c.name === form.category)
+                  ? [{ id: '__legacy_cat__', name: form.category }, ...categories]
+                  : categories
+                ).map((c) => (
+                  <option key={c.id} value={c.name}>{c.name}</option>
+                ))}
+              </Select>
+              {!editing && <p className="text-xs text-slate-400 mt-1">Menentukan awalan kode part.</p>}
             </div>
             <div>
               <Label>Location</Label>
-              <Input value={form.location} onChange={(e) => setForm((f) => ({ ...f, location: e.target.value }))} placeholder="Rack A-3" />
+              <Select value={form.location} onChange={(e) => setForm((f) => ({ ...f, location: e.target.value }))}>
+                <option value="">None</option>
+                {(form.location && !locations.some((l) => l.name === form.location)
+                  ? [{ id: '__legacy_loc__', name: form.location }, ...locations]
+                  : locations
+                ).map((l) => (
+                  <option key={l.id} value={l.name}>{l.name}</option>
+                ))}
+              </Select>
             </div>
           </div>
+          <p className="text-xs text-slate-400">
+            Kategori, satuan, dan lokasi baru bisa ditambahkan lewat menu Master Data Inventory.
+          </p>
           <div className="grid grid-cols-3 gap-4">
             <div>
               <Label>Min Stock</Label>
@@ -310,7 +393,7 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
           </div>
           <div className="flex justify-end gap-3 pt-2">
             <Button variant="secondary" onClick={() => setShowForm(false)}>Cancel</Button>
-            <Button onClick={handleSave} disabled={acting || !form.code || !form.name}>
+            <Button onClick={handleSave} disabled={acting || !form.name}>
               {acting ? 'Saving...' : editing ? 'Update' : 'Create'}
             </Button>
           </div>
