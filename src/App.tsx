@@ -7,6 +7,8 @@ import WorkOrders from '@/pages/WorkOrders';
 import WorkOrderDetail from '@/pages/WorkOrderDetail';
 import SpareParts from '@/pages/SpareParts';
 import Transactions from '@/pages/Transactions';
+import PurchaseRequirements from '@/pages/PurchaseRequirements';
+import GoodsReceipts from '@/pages/GoodsReceipts';
 import AdminPanel from '@/pages/AdminPanel';
 import ActivityLogPage from '@/pages/ActivityLogPage';
 import { Spinner } from '@/components/ui';
@@ -56,6 +58,8 @@ function AppContent() {
           {page === 'workorders' && <WorkOrders onSelectWO={setSelectedWO} />}
           {page === 'spareparts' && <SpareParts />}
           {page === 'transactions' && <Transactions />}
+          {page === 'goods_receipts' && <GoodsReceipts />}
+          {page === 'purchase_requirements' && <PurchaseRequirements />}
           {page === 'inventory' && <SpareParts lowStockOnly />}
           {page === 'master_wo' && <AdminPanel scope="wo" />}
           {page === 'master_inventory' && <AdminPanel scope="inventory" />}

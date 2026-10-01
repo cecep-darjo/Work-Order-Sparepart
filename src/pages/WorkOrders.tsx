@@ -2,6 +2,9 @@ import { useEffect, useState, useCallback } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import {
   supabase,
+  WO_SELECT,
+  spvOrFilter,
+  woTechnicians,
   STATUS_LABELS,
   STATUS_COLORS,
   PRIORITY_LABELS,
@@ -33,7 +36,6 @@ export default function WorkOrders({
   const [areas, setAreas] = useState<Area[]>([]);
   const [equipmentList, setEquipmentList] = useState<Equipment[]>([]);
   const [spvList, setSpvList] = useState<Profile[]>([]);
-  const [techList, setTechList] = useState<Profile[]>([]);
   const [createForm, setCreateForm] = useState({
     department_id: '',
     area_id: '',
@@ -41,9 +43,9 @@ export default function WorkOrders({
     problem_description: '',
     priority: 'medium' as 'low' | 'medium' | 'high' | 'urgent',
     spv_id: '',
-    technician_id: '',
   });
   const [creating, setCreating] = useState(false);
+  const [onlyMine, setOnlyMine] = useState(false); // SPV: hanya WO dengan dirinya sebagai PIC
 
   const loadWorkOrders = useCallback(async () => {
     if (!profile) return;
@@ -51,14 +53,13 @@ export default function WorkOrders({
 
     let query = supabase
       .from('work_orders')
-      .select('*, department:departments(*), area:areas(*), equipment:equipment(*), spv:profiles!spv_id(*), technician:profiles!technician_id(*)')
+      .select(WO_SELECT)
       .order('created_at', { ascending: false });
 
     if (profile.role === 'spv') {
-      query = query.eq('department_id', profile.department_id);
-    } else if (profile.role === 'teknisi') {
-      query = query.eq('technician_id', profile.id);
+      query = onlyMine ? query.eq('spv_id', profile.id) : query.or(spvOrFilter(profile));
     }
+    // Teknisi: RLS hanya mengembalikan WO tempat dia ditugaskan (termasuk penugasan bersama).
 
     if (statusFilter !== 'all') {
       query = query.eq('status', statusFilter);
@@ -71,21 +72,19 @@ export default function WorkOrders({
     const { data } = await query;
     setWorkOrders((data as unknown as WorkOrder[]) ?? []);
     setLoading(false);
-  }, [profile, statusFilter, search]);
+  }, [profile, statusFilter, search, onlyMine]);
 
   useEffect(() => {
     loadWorkOrders();
   }, [loadWorkOrders]);
 
   async function loadCreateData() {
-    const [{ data: depts }, { data: spvs }, { data: techs }] = await Promise.all([
+    const [{ data: depts }, { data: spvs }] = await Promise.all([
       supabase.from('departments').select('*').order('name'),
-      supabase.from('profiles').select('*').eq('role', 'spv').eq('is_active', true).order('full_name'),
-      supabase.from('profiles').select('*').eq('role', 'teknisi').eq('is_active', true).order('full_name'),
+      supabase.from('profiles').select('*').in('role', ['spv', 'ss']).eq('is_active', true).order('full_name'),
     ]);
     setDepartments((depts as Department[]) ?? []);
     setSpvList((spvs as Profile[]) ?? []);
-    setTechList((techs as Profile[]) ?? []);
   }
 
   async function loadAreas(deptId: string) {
@@ -125,10 +124,6 @@ export default function WorkOrders({
     if (createForm.area_id) insertData.area_id = createForm.area_id;
     if (createForm.equipment_id) insertData.equipment_id = createForm.equipment_id;
     if (createForm.spv_id) insertData.spv_id = createForm.spv_id;
-    if (createForm.technician_id) {
-      insertData.technician_id = createForm.technician_id;
-      insertData.status = 'assigned';
-    }
 
     const { data, error } = await supabase.from('work_orders').insert(insertData).select().single();
 
@@ -159,14 +154,13 @@ export default function WorkOrders({
       problem_description: '',
       priority: 'medium',
       spv_id: '',
-      technician_id: '',
     });
     loadWorkOrders();
   }
 
   if (loading) return <Spinner />;
 
-  const canCreate = profile?.role === 'admin';
+  const canCreate = profile?.role === 'admin' || profile?.role === 'ss';
 
   return (
     <div className="space-y-4">
@@ -193,6 +187,11 @@ export default function WorkOrders({
             </option>
           ))}
         </Select>
+        {profile?.role === 'spv' && (
+          <Button variant={onlyMine ? 'primary' : 'secondary'} onClick={() => setOnlyMine((v) => !v)}>
+            {onlyMine ? 'PIC Saya' : 'Semua Departemen'}
+          </Button>
+        )}
         {canCreate && (
           <Button onClick={() => { loadCreateData(); setShowCreate(true); }}>
             <Plus className="w-4 h-4" />
@@ -228,7 +227,14 @@ export default function WorkOrders({
                 <div className="flex items-center gap-4 text-xs text-slate-400 flex-wrap">
                   {wo.department && <span>{wo.department.name}</span>}
                   {wo.equipment && <span>• {wo.equipment.name}</span>}
-                  {wo.technician && <span>• Tech: {wo.technician.full_name}</span>}
+                  {profile?.role === 'spv' && (
+                    <span>
+                      • PIC: {wo.spv_id === profile.id ? <b className="text-blue-600">Anda</b> : (wo.spv?.full_name ?? '-')}
+                    </span>
+                  )}
+                  {woTechnicians(wo).length > 0 && (
+                    <span>• Tech: {woTechnicians(wo).map((t) => t.full_name).join(', ')}</span>
+                  )}
                   <span>• {new Date(wo.created_at).toLocaleDateString()}</span>
                 </div>
               </button>
@@ -311,31 +317,20 @@ export default function WorkOrders({
             </Select>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <Label>SPV</Label>
-              <Select
-                value={createForm.spv_id}
-                onChange={(e) => setCreateForm((f) => ({ ...f, spv_id: e.target.value }))}
-              >
-                <option value="">Select SPV...</option>
-                {spvList.map((s) => (
-                  <option key={s.id} value={s.id}>{s.full_name}</option>
-                ))}
-              </Select>
-            </div>
-            <div>
-              <Label>Technician</Label>
-              <Select
-                value={createForm.technician_id}
-                onChange={(e) => setCreateForm((f) => ({ ...f, technician_id: e.target.value }))}
-              >
-                <option value="">Select technician...</option>
-                {techList.map((t) => (
-                  <option key={t.id} value={t.id}>{t.full_name}</option>
-                ))}
-              </Select>
-            </div>
+          <div>
+            <Label>SPV</Label>
+            <Select
+              value={createForm.spv_id}
+              onChange={(e) => setCreateForm((f) => ({ ...f, spv_id: e.target.value }))}
+            >
+              <option value="">Select SPV...</option>
+              {spvList.map((s) => (
+                <option key={s.id} value={s.id}>{s.full_name}</option>
+              ))}
+            </Select>
+            <p className="text-xs text-slate-400 mt-1">
+              Penugasan teknisi dilakukan oleh SPV yang ditunjuk, dari halaman detail WO.
+            </p>
           </div>
 
           <div className="flex justify-end gap-3 pt-2">

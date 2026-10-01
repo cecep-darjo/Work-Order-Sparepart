@@ -1,9 +1,13 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { supabase, STATUS_LABELS, STATUS_COLORS, type WorkOrder, type SparePart, stockStatus, type WOStatus } from '@/lib/supabase';
+import { supabase, WO_SELECT, spvOrFilter, STATUS_LABELS, STATUS_COLORS, type WorkOrder, type SparePart, stockStatus, type WOStatus } from '@/lib/supabase';
 import { Card, Badge, Spinner } from '@/components/ui';
-import { ClipboardList, AlertTriangle, CheckCircle2, Clock, TrendingDown, PackageX } from 'lucide-react';
+import { ClipboardList, AlertTriangle, CheckCircle2, Clock, TrendingDown, PackageX, UserCheck } from 'lucide-react';
 import type { PageKey } from '@/components/Layout';
+import { PartRequestsInbox } from '@/components/PartRequests';
+import { PurchaseRequirementsInbox } from '@/pages/PurchaseRequirements';
+
+type PrStatus = 'pending_numbering' | 'numbered';
 
 export default function Dashboard({ onNavigate }: { onNavigate: (page: PageKey) => void }) {
   const { profile } = useAuth();
@@ -11,6 +15,8 @@ export default function Dashboard({ onNavigate }: { onNavigate: (page: PageKey) 
   const [workOrders, setWorkOrders] = useState<WorkOrder[]>([]);
   const [lowStockParts, setLowStockParts] = useState<SparePart[]>([]);
   const [stats, setStats] = useState({ total: 0, open: 0, done: 0, pending: 0 });
+  const [picStats, setPicStats] = useState({ total: 0, open: 0 }); // SPV: WO dengan dirinya sebagai PIC
+  const [prStats, setPrStats] = useState({ total: 0, pending: 0, numbered: 0 });
 
   useEffect(() => {
     loadData();
@@ -22,34 +28,40 @@ export default function Dashboard({ onNavigate }: { onNavigate: (page: PageKey) 
 
     let woQuery = supabase
       .from('work_orders')
-      .select('*, department:departments(*), area:areas(*), equipment:equipment(*), spv:profiles!spv_id(*), technician:profiles!technician_id(*)')
+      .select(WO_SELECT)
       .order('created_at', { ascending: false })
       .limit(10);
 
     if (profile.role === 'spv') {
-      woQuery = woQuery.eq('department_id', profile.department_id);
-    } else if (profile.role === 'teknisi') {
-      woQuery = woQuery.eq('technician_id', profile.id);
+      woQuery = woQuery.or(spvOrFilter(profile));
     }
+    // Teknisi: RLS hanya mengembalikan WO tempat dia ditugaskan (termasuk penugasan bersama).
 
     const { data: wos } = await woQuery;
     setWorkOrders((wos as unknown as WorkOrder[]) ?? []);
 
     // Stats
-    let statQuery = supabase.from('work_orders').select('status', { count: 'exact', head: false });
+    let statQuery = supabase.from('work_orders').select('status, spv_id', { count: 'exact', head: false });
     if (profile.role === 'spv') {
-      statQuery = statQuery.eq('department_id', profile.department_id);
-    } else if (profile.role === 'teknisi') {
-      statQuery = statQuery.eq('technician_id', profile.id);
+      statQuery = statQuery.or(spvOrFilter(profile));
     }
     const { data: allWos } = await statQuery;
-    const allStatuses = (allWos as { status: WOStatus }[]) ?? [];
+    const allStatuses = (allWos as { status: WOStatus; spv_id: string | null }[]) ?? [];
     setStats({
       total: allStatuses.length,
       open: allStatuses.filter((w) => !['closed', 'verified'].includes(w.status)).length,
       done: allStatuses.filter((w) => ['done', 'verified', 'closed'].includes(w.status)).length,
       pending: allStatuses.filter((w) => w.status === 'pending').length,
     });
+
+    // SPV: highlight WO yang PIC-nya dirinya sendiri, terpisah dari total departemen.
+    if (profile.role === 'spv') {
+      const mine = allStatuses.filter((w) => w.spv_id === profile.id);
+      setPicStats({
+        total: mine.length,
+        open: mine.filter((w) => !['closed', 'verified'].includes(w.status)).length,
+      });
+    }
 
     // Low stock for admin/inventory
     if (profile.role === 'admin' || profile.role === 'inventory') {
@@ -62,6 +74,19 @@ export default function Dashboard({ onNavigate }: { onNavigate: (page: PageKey) 
       setLowStockParts(lowStock);
     }
 
+    // Progress PR untuk admin/SS/inventory
+    if (profile.role === 'admin' || profile.role === 'ss' || profile.role === 'inventory') {
+      const { data: prs } = await supabase.from('purchase_requirements').select('status');
+      const statuses = (prs as { status: PrStatus }[]) ?? [];
+      setPrStats({
+        total: statuses.length,
+        pending: statuses.filter((r) => r.status === 'pending_numbering').length,
+        numbered: statuses.filter((r) => r.status === 'numbered').length,
+      });
+    } else {
+      setPrStats({ total: 0, pending: 0, numbered: 0 });
+    }
+
     setLoading(false);
   }
 
@@ -69,6 +94,9 @@ export default function Dashboard({ onNavigate }: { onNavigate: (page: PageKey) 
   if (!profile) return null;
 
   const showInventory = profile.role === 'admin' || profile.role === 'inventory';
+  const showPrInbox = profile.role === 'admin' || profile.role === 'inventory';
+  const showPrProgress = profile.role === 'admin' || profile.role === 'ss' || profile.role === 'inventory';
+  const prProgressPct = prStats.total > 0 ? Math.round((prStats.numbered / prStats.total) * 100) : 0;
 
   return (
     <div className="space-y-6">
@@ -79,6 +107,58 @@ export default function Dashboard({ onNavigate }: { onNavigate: (page: PageKey) 
         <StatCard icon={AlertTriangle} label="Pending" value={stats.pending} color="orange" />
         <StatCard icon={CheckCircle2} label="Completed" value={stats.done} color="emerald" />
       </div>
+
+      {/* SPV: WO dengan dirinya sebagai PIC, sebelumnya tidak ada tampilan ini */}
+      {profile.role === 'spv' && (
+        <div className="grid grid-cols-2 gap-3 sm:gap-4">
+          <StatCard icon={UserCheck} label="PIC Saya (Total)" value={picStats.total} color="blue" />
+          <StatCard icon={UserCheck} label="PIC Saya (Open)" value={picStats.open} color="amber" />
+        </div>
+      )}
+
+      {/* Permintaan spare part dari WO: PIC inventory tinggal approve */}
+      {showInventory && <PartRequestsInbox />}
+
+      {/* Progress Purchase Requirement */}
+      {showPrProgress && (
+        <Card className="p-5 space-y-3">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <h2 className="font-semibold text-slate-900">Progress Purchase Requirement</h2>
+            <button
+              onClick={() => onNavigate('purchase_requirements')}
+              className="text-xs text-blue-600 hover:text-blue-700 font-medium"
+            >
+              Lihat detail →
+            </button>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+            <div className="rounded-lg bg-slate-50 p-3">
+              <p className="text-xs text-slate-400">Total PR</p>
+              <p className="text-lg font-semibold text-slate-900">{prStats.total}</p>
+            </div>
+            <div className="rounded-lg bg-amber-50 p-3">
+              <p className="text-xs text-amber-700">Pending Numbering</p>
+              <p className="text-lg font-semibold text-amber-800">{prStats.pending}</p>
+            </div>
+            <div className="rounded-lg bg-emerald-50 p-3">
+              <p className="text-xs text-emerald-700">Sudah Dinomori</p>
+              <p className="text-lg font-semibold text-emerald-800">{prStats.numbered}</p>
+            </div>
+          </div>
+          <div>
+            <div className="flex items-center justify-between text-xs text-slate-500 mb-1">
+              <span>Progress selesai numbering</span>
+              <span>{prProgressPct}%</span>
+            </div>
+            <div className="h-2 w-full rounded-full bg-slate-100 overflow-hidden">
+              <div className="h-2 bg-emerald-500" style={{ width: `${prProgressPct}%` }} />
+            </div>
+          </div>
+        </Card>
+      )}
+
+      {/* Purchase Requirement: SS membuat, inventory/admin melengkapi nomor SAP & PR */}
+      {showPrInbox && <PurchaseRequirementsInbox onNavigate={onNavigate} />}
 
       <div className={`grid ${showInventory ? 'lg:grid-cols-2' : 'grid-cols-1'} gap-6`}>
         {/* Recent Work Orders */}
@@ -107,6 +187,9 @@ export default function Dashboard({ onNavigate }: { onNavigate: (page: PageKey) 
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-medium text-slate-900 truncate">
                       {wo.wo_number}
+                      {profile.role === 'spv' && wo.spv_id === profile.id && (
+                        <span className="ml-2 text-xs font-normal text-blue-600">PIC: Anda</span>
+                      )}
                     </p>
                     <p className="text-xs text-slate-500 truncate">{wo.problem_description}</p>
                   </div>

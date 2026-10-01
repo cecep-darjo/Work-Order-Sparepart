@@ -1,16 +1,50 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useMemo } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import {
   supabase,
   TX_TYPE_LABELS,
   TX_TYPE_COLORS,
+  GR_KIND_LABELS,
   type InventoryTransaction,
   type SparePart,
 } from '@/lib/supabase';
 import { Card, Badge, Button, Select, Input, Label, Modal, Textarea, Spinner, EmptyState } from '@/components/ui';
-import { Search, ArrowDownToLine, ArrowUpFromLine, History, PackageSearch, RefreshCw } from 'lucide-react';
+import { SearchablePicker } from '@/components/Pickers';
+import EditTransactionModal from '@/components/EditTransactionModal';
+import { printIssueSlipByNo, printLegacyIssue } from '@/lib/manualIssue';
+import { Search, ArrowDownToLine, ArrowUpFromLine, PackageSearch, RefreshCw, FileDown, Plus, Trash2, Paperclip, ClipboardCheck, Pencil } from 'lucide-react';
 
-type TxKind = 'stock_in' | 'stock_out';
+type GRKind = 'credit' | 'cash' | 'import';
+
+/** Satu baris pada daftar pemasukan. Baris dari PR membawa pr_item_id + batas sisa PR. */
+type ReceiptLine = {
+  key: string;
+  spare_part_id: string;
+  quantity: number;
+  pr_item_id: string | null;
+  pr_no: string | null;
+  supplier_name: string | null;
+  max: number | null;
+};
+
+type RecallPR = {
+  id: string;
+  pr_no: string | null;
+  sap_no: string | null;
+  supplier_id: string;
+  created_at: string;
+  supplier: { id: string; code: string; name: string } | null;
+  items: { id: string; spare_part_id: string | null; spare_part_name: string; quantity: number; received_qty: number }[];
+};
+
+type RecallItem = RecallPR['items'][number];
+
+function remaining(i: RecallItem): number {
+  return Math.round((Number(i.quantity) - Number(i.received_qty)) * 1000) / 1000;
+}
+
+const MAX_GR_FILE_SIZE = 5 * 1024 * 1024;
+const ALLOWED_GR_MIME = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
 
 export default function Transactions() {
   const { profile } = useAuth();
@@ -21,19 +55,29 @@ export default function Transactions() {
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('all');
   const [partFilter, setPartFilter] = useState('all');
-  const [showForm, setShowForm] = useState(false);
-  const [txKind, setTxKind] = useState<TxKind>('stock_in');
+  const [showReceipt, setShowReceipt] = useState(false);
   const [acting, setActing] = useState(false);
+  const [showIssue, setShowIssue] = useState(false);
+  const [issueItems, setIssueItems] = useState<{ spare_part_id: string; quantity: number }[]>([]);
+  const [issuePart, setIssuePart] = useState('');
+  const [issueQty, setIssueQty] = useState(1);
+  const [issueForm, setIssueForm] = useState({ recipient: '', destination: '', reference: '', notes: '' });
+  const [busyPdf, setBusyPdf] = useState<string | null>(null);
   const [stockCardPart, setStockCardPart] = useState<SparePart | null>(null);
   const [stockCard, setStockCard] = useState<InventoryTransaction[]>([]);
-  const [form, setForm] = useState({
-    spare_part_id: '',
-    quantity: 0,
-    reference: '',
-    notes: '',
-    source: '',
-    destination: '',
-  });
+  const [grFiles, setGrFiles] = useState<File[]>([]);
+  // Perkiraan nomor GR berikutnya (hanya tampilan; nomor sebenarnya diambil server saat pemasukan disimpan).
+  const [previewGrNo, setPreviewGrNo] = useState<string | null>(null);
+  const [previewingGrNo, setPreviewingGrNo] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [editTxId, setEditTxId] = useState<string | null>(null); // admin: edit transaksi/dokumen
+  const [receiptLines, setReceiptLines] = useState<ReceiptLine[]>([]);
+  const [receiptPart, setReceiptPart] = useState('');
+  const [receiptQty, setReceiptQty] = useState(1);
+  const [receiptForm, setReceiptForm] = useState({ gr_kind: 'credit' as GRKind, source: '', reference: '', notes: '' });
+  const [openPrs, setOpenPrs] = useState<RecallPR[]>([]);
+  const [loadingPrs, setLoadingPrs] = useState(false);
+  const [recallSupplier, setRecallSupplier] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -55,6 +99,7 @@ export default function Transactions() {
         t.spare_part?.code?.toLowerCase().includes(s) ||
         (t.reference ?? '').toLowerCase().includes(s) ||
         (t.notes ?? '').toLowerCase().includes(s) ||
+        (t.gr_no ?? '').toLowerCase().includes(s) ||
         ((t as InventoryTransaction & { transaction_no?: string }).transaction_no ?? '').toLowerCase().includes(s)
       );
     }
@@ -64,41 +109,256 @@ export default function Transactions() {
 
   useEffect(() => { load(); }, [load]);
 
-  function openTransaction(type: TxKind) {
-    setTxKind(type);
-    setForm({ spare_part_id: '', quantity: 0, reference: '', notes: '', source: '', destination: '' });
-    setShowForm(true);
+  async function openReceipt() {
+    setReceiptLines([]);
+    setReceiptPart('');
+    setReceiptQty(1);
+    setReceiptForm({ gr_kind: 'credit', source: '', reference: '', notes: '' });
+    setGrFiles([]);
+    setPreviewGrNo(null);
+    setRecallSupplier('');
+    setOpenPrs([]);
+    setShowReceipt(true);
+
+    // PR yang sudah bernomor & masih punya sisa barang -> bisa dipanggil berdasarkan supplier.
+    setLoadingPrs(true);
+    const { data } = await supabase
+      .from('purchase_requirements')
+      .select(
+        'id, pr_no, sap_no, supplier_id, created_at, supplier:inventory_suppliers(id, code, name), items:purchase_requirement_items(id, spare_part_id, spare_part_name, quantity, received_qty)'
+      )
+      .eq('status', 'numbered')
+      .order('created_at', { ascending: true });
+    const rows = ((data as unknown as RecallPR[]) ?? []).filter((pr) => (pr.items ?? []).some((i) => remaining(i) > 0));
+    setOpenPrs(rows);
+    setLoadingPrs(false);
   }
 
-  async function submitTransaction() {
-    if (!profile || !form.spare_part_id || form.quantity <= 0) {
-      alert('Spare part dan quantity wajib diisi.');
+  function fmtSize(bytes: number): string {
+    if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+
+  function handlePickGrFiles(files: FileList | null) {
+    if (!files) return;
+    const selected = Array.from(files);
+    const next: File[] = [];
+
+    for (const f of selected) {
+      if (f.size > MAX_GR_FILE_SIZE) {
+        alert(`File ${f.name} melebihi 5MB.`);
+        continue;
+      }
+      if (!ALLOWED_GR_MIME.includes(f.type)) {
+        alert(`Tipe file ${f.name} tidak didukung. Hanya JPG/PNG/WEBP/PDF.`);
+        continue;
+      }
+      const duplicate = [...grFiles, ...next].some((x) => x.name === f.name && x.size === f.size && x.lastModified === f.lastModified);
+      if (!duplicate) next.push(f);
+    }
+
+    if (next.length > 0) setGrFiles((prev) => [...prev, ...next]);
+  }
+
+  function removeGrFile(index: number) {
+    setGrFiles((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  async function uploadGrFiles(files: File[]): Promise<string[]> {
+    const urls: string[] = [];
+    for (const file of files) {
+      const ext = file.name.includes('.') ? file.name.split('.').pop() : '';
+      const safeBase = file.name.replace(/\.[^/.]+$/, '').replace(/[^a-zA-Z0-9_-]+/g, '-').slice(0, 60) || 'file';
+      const objectPath = `gr/${new Date().getFullYear()}/${Date.now()}-${crypto.randomUUID()}-${safeBase}${ext ? `.${ext}` : ''}`;
+      const { error: uploadError } = await supabase.storage
+        .from('inventory-gr-files')
+        .upload(objectPath, file, { upsert: false, contentType: file.type });
+      if (uploadError) throw uploadError;
+      const { data } = supabase.storage.from('inventory-gr-files').getPublicUrl(objectPath);
+      urls.push(data.publicUrl);
+    }
+    return urls;
+  }
+
+  /** Hanya MELIHAT nomor GR berikutnya. Tidak ada nomor yang terpakai sampai pemasukan disimpan. */
+  async function previewGrNumber() {
+    setPreviewingGrNo(true);
+    const { data, error } = await supabase.rpc('peek_gr_number', { p_gr_kind: receiptForm.gr_kind });
+    setPreviewingGrNo(false);
+    if (error || !data) {
+      alert('Gagal mengambil nomor GR: ' + (error?.message ?? 'nomor kosong'));
       return;
     }
-    const part = parts.find((p) => p.id === form.spare_part_id);
+    setPreviewGrNo(String(data));
+  }
+
+  const recallSuppliers = useMemo(() => {
+    const map = new Map<string, { id: string; label: string; count: number }>();
+    for (const pr of openPrs) {
+      const cur = map.get(pr.supplier_id);
+      if (cur) cur.count += 1;
+      else map.set(pr.supplier_id, { id: pr.supplier_id, label: pr.supplier ? `${pr.supplier.code} - ${pr.supplier.name}` : '(supplier tidak diketahui)', count: 1 });
+    }
+    return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label));
+  }, [openPrs]);
+
+  const recallPrs = useMemo(() => openPrs.filter((pr) => pr.supplier_id === recallSupplier), [openPrs, recallSupplier]);
+
+  /** Tambahkan item PR ke daftar pemasukan (qty awal = sisa PR, boleh diubah untuk penerimaan sebagian). */
+  function recallItems(pr: RecallPR, items: RecallItem[]) {
+    const added: ReceiptLine[] = [];
+    let unlinked = 0;
+    for (const it of items) {
+      const rem = remaining(it);
+      if (rem <= 0) continue;
+      if (!it.spare_part_id) { unlinked += 1; continue; }
+      if (receiptLines.some((l) => l.pr_item_id === it.id)) continue;
+      added.push({
+        key: crypto.randomUUID(),
+        spare_part_id: it.spare_part_id,
+        quantity: rem,
+        pr_item_id: it.id,
+        pr_no: pr.pr_no,
+        supplier_name: pr.supplier?.name ?? null,
+        max: rem,
+      });
+    }
+    if (unlinked > 0) {
+      alert(`${unlinked} item PR belum terhubung ke master spare part (PR lama), jadi tidak bisa dipanggil. Tambahkan manual lewat pencarian spare part.`);
+    }
+    if (added.length > 0) setReceiptLines((prev) => [...prev, ...added]);
+  }
+
+  function addReceiptLine() {
+    const part = parts.find((p) => p.id === receiptPart);
     if (!part) return;
-    if (txKind === 'stock_out' && form.quantity > part.current_stock) {
-      alert(`Stok tidak mencukupi. Stok tersedia: ${part.current_stock} ${part.unit}.`);
-      return;
-    }
-    setActing(true);
-    const { error } = await supabase.rpc('apply_inventory_transaction', {
-      p_spare_part_id: form.spare_part_id,
-      p_type: txKind,
-      p_quantity: form.quantity,
-      p_reference: form.reference || null,
-      p_notes: form.notes || null,
-      p_work_order_id: null,
-      p_source: form.source || null,
-      p_destination: form.destination || null,
+    if (!(receiptQty > 0)) { alert('Quantity harus lebih besar dari 0.'); return; }
+    setReceiptLines((prev) => {
+      const existing = prev.find((l) => l.spare_part_id === receiptPart && !l.pr_item_id);
+      if (existing) return prev.map((l) => (l === existing ? { ...l, quantity: l.quantity + receiptQty } : l));
+      return [...prev, { key: crypto.randomUUID(), spare_part_id: receiptPart, quantity: receiptQty, pr_item_id: null, pr_no: null, supplier_name: null, max: null }];
     });
-    setActing(false);
-    if (error) {
-      alert('Transaksi gagal: ' + error.message);
+    setReceiptPart('');
+    setReceiptQty(1);
+  }
+
+  function updateReceiptQty(key: string, quantity: number) {
+    setReceiptLines((prev) => prev.map((l) => (l.key === key ? { ...l, quantity } : l)));
+  }
+
+  async function submitReceipt() {
+    if (receiptLines.length === 0) { alert('Tambahkan minimal satu barang.'); return; }
+    for (const l of receiptLines) {
+      const part = parts.find((p) => p.id === l.spare_part_id);
+      const name = part?.name ?? 'barang';
+      if (!(l.quantity > 0)) { alert(`Quantity ${name} harus lebih besar dari 0.`); return; }
+      if (l.max !== null && l.quantity > l.max) {
+        alert(`Qty ${name} melebihi sisa PR (${l.max} ${part?.unit ?? ''}).`);
+        return;
+      }
+    }
+
+    const uniq = (xs: (string | null)[]) => Array.from(new Set(xs.filter((x): x is string => Boolean(x))));
+    const prNos = uniq(receiptLines.map((l) => l.pr_no));
+    const supplierNames = uniq(receiptLines.map((l) => l.supplier_name));
+    const reference = receiptForm.reference.trim() || prNos.join(', ');
+    const source = receiptForm.source.trim() || supplierNames.join(', ');
+
+    setActing(true);
+    try {
+      const uploaded = grFiles.length > 0 ? await uploadGrFiles(grFiles) : [];
+      const { data, error } = await supabase.rpc('receive_stock_multi', {
+        p_items: receiptLines.map((l) => ({ spare_part_id: l.spare_part_id, quantity: l.quantity, pr_item_id: l.pr_item_id })),
+        p_gr_kind: receiptForm.gr_kind,
+        p_gr_no: null, // nomor final dibuat server di dalam transaksi simpan
+        p_source: source || null,
+        p_reference: reference || null,
+        p_notes: receiptForm.notes.trim() || null,
+        p_gr_attachments: uploaded.length > 0 ? uploaded : null,
+      });
+      if (error) {
+        alert('Pemasukan gagal: ' + error.message);
+        return;
+      }
+      const finalNo = String(data ?? '');
+      setNotice(
+        `Pemasukan tersimpan dengan No. GR ${finalNo}` +
+          (previewGrNo && previewGrNo !== finalNo ? ` (berbeda dari perkiraan ${previewGrNo} karena nomor itu sudah dipakai penerimaan lain).` : '.')
+      );
+      setShowReceipt(false);
+      setReceiptLines([]);
+      setGrFiles([]);
+      setPreviewGrNo(null);
+      await load();
+    } catch (e) {
+      alert('Gagal upload/simpan pemasukan: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setActing(false);
+    }
+  }
+
+  function openIssue() {
+    setIssueItems([]);
+    setIssuePart('');
+    setIssueQty(1);
+    setIssueForm({ recipient: '', destination: '', reference: '', notes: '' });
+    setShowIssue(true);
+  }
+
+  function addIssueItem() {
+    const part = parts.find((p) => p.id === issuePart);
+    if (!part) return;
+    if (issueQty <= 0) { alert('Quantity harus lebih besar dari 0.'); return; }
+    const already = issueItems.find((i) => i.spare_part_id === issuePart)?.quantity ?? 0;
+    if (already + issueQty > part.current_stock) {
+      alert(`Stok tidak mencukupi. Tersedia ${part.current_stock} ${part.unit}${already ? ` (sudah ${already} di daftar)` : ''}.`);
       return;
     }
-    setShowForm(false);
+    setIssueItems((prev) =>
+      already
+        ? prev.map((i) => (i.spare_part_id === issuePart ? { ...i, quantity: i.quantity + issueQty } : i))
+        : [...prev, { spare_part_id: issuePart, quantity: issueQty }]
+    );
+    setIssuePart('');
+    setIssueQty(1);
+  }
+
+  async function submitIssue() {
+    if (issueItems.length === 0) { alert('Tambahkan minimal satu barang.'); return; }
+    if (!issueForm.recipient.trim()) { alert('Nama penerima wajib diisi.'); return; }
+    setActing(true);
+    const { data, error } = await supabase.rpc('issue_stock_manual', {
+      p_items: issueItems,
+      p_recipient: issueForm.recipient.trim(),
+      p_destination: issueForm.destination.trim() || null,
+      p_reference: issueForm.reference.trim() || null,
+      p_notes: issueForm.notes.trim() || null,
+    });
+    if (error) {
+      setActing(false);
+      alert('Pengeluaran gagal: ' + error.message);
+      return;
+    }
+    const slipNo = data as string;
+    try {
+      await printIssueSlipByNo(slipNo);
+    } catch (e) {
+      alert(`Pengeluaran ${slipNo} tersimpan, tetapi PDF gagal dibuat: ` + (e instanceof Error ? e.message : String(e)));
+    }
+    setActing(false);
+    setShowIssue(false);
     await load();
+  }
+
+  async function printRow(tx: InventoryTransaction) {
+    setBusyPdf(tx.id);
+    try {
+      if (tx.issue_slip_no) await printIssueSlipByNo(tx.issue_slip_no);
+      else await printLegacyIssue(tx.id);
+    } catch (e) {
+      alert('PDF gagal dibuat: ' + (e instanceof Error ? e.message : String(e)));
+    }
+    setBusyPdf(null);
   }
 
   async function openStockCard(part: SparePart) {
@@ -111,12 +371,16 @@ export default function Transactions() {
     setStockCard((data as unknown as InventoryTransaction[]) ?? []);
   }
 
-  const selectedPart = parts.find((p) => p.id === form.spare_part_id);
-
   if (loading) return <Spinner />;
 
   return (
     <div className="space-y-4">
+      {notice && (
+        <div className="rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-800 px-4 py-3 text-sm flex items-center justify-between gap-3">
+          <span>{notice}</span>
+          <button onClick={() => setNotice(null)} className="text-emerald-700 hover:text-emerald-900 font-medium">Tutup</button>
+        </div>
+      )}
       <div className="flex flex-col lg:flex-row lg:items-center gap-3">
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
@@ -124,10 +388,10 @@ export default function Transactions() {
         </div>
         {canTransact && (
           <div className="flex gap-2">
-            <Button onClick={() => openTransaction('stock_in')} variant="success">
+            <Button onClick={openReceipt} variant="success">
               <ArrowDownToLine className="w-4 h-4" /> Pemasukan
             </Button>
-            <Button onClick={() => openTransaction('stock_out')} variant="danger">
+            <Button onClick={openIssue} variant="danger">
               <ArrowUpFromLine className="w-4 h-4" /> Pengeluaran
             </Button>
           </div>
@@ -156,6 +420,7 @@ export default function Transactions() {
               <thead className="bg-slate-50 text-xs text-slate-500 uppercase">
                 <tr>
                   <th className="text-left px-4 py-3">Transaksi</th>
+                  <th className="text-left px-4 py-3">No. GR</th>
                   <th className="text-left px-4 py-3">Tanggal</th>
                   <th className="text-left px-4 py-3">Spare Part</th>
                   <th className="text-left px-4 py-3">Jenis</th>
@@ -163,6 +428,7 @@ export default function Transactions() {
                   <th className="text-right px-4 py-3">Saldo</th>
                   <th className="text-left px-4 py-3">Referensi</th>
                   <th className="text-left px-4 py-3">Keterangan</th>
+                  <th className="text-right px-4 py-3">Dokumen</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -170,7 +436,15 @@ export default function Transactions() {
                   const extended = tx as InventoryTransaction & { transaction_no?: string; stock_before?: number | null };
                   return (
                     <tr key={tx.id} className="hover:bg-slate-50">
-                      <td className="px-4 py-3 font-medium text-slate-700 whitespace-nowrap">{extended.transaction_no ?? '-'}</td>
+                      <td className="px-4 py-3 font-medium text-slate-700 whitespace-nowrap">{extended.transaction_no ?? '-'}{tx.issue_slip_no && <div className="text-xs font-normal text-slate-400">{tx.issue_slip_no}</div>}</td>
+                      <td className="px-4 py-3 text-xs text-slate-500 whitespace-nowrap">
+                        {tx.gr_no ? (
+                          <>
+                            <div className="font-medium text-slate-700">{tx.gr_no}</div>
+                            {tx.gr_kind && <div>{GR_KIND_LABELS[tx.gr_kind]}</div>}
+                          </>
+                        ) : '-'}
+                      </td>
                       <td className="px-4 py-3 text-xs text-slate-500 whitespace-nowrap">{new Date(tx.created_at).toLocaleString('id-ID')}</td>
                       <td className="px-4 py-3"><b>{tx.spare_part?.code}</b><div className="text-xs text-slate-500">{tx.spare_part?.name}</div></td>
                       <td className="px-4 py-3"><Badge className={TX_TYPE_COLORS[tx.type]}>{TX_TYPE_LABELS[tx.type]}</Badge></td>
@@ -178,6 +452,32 @@ export default function Transactions() {
                       <td className="px-4 py-3 text-right text-slate-600">{tx.balance_after ?? '-'}</td>
                       <td className="px-4 py-3 text-xs text-slate-500">{tx.reference ?? '-'}</td>
                       <td className="px-4 py-3 text-xs text-slate-500 max-w-xs">{tx.notes ?? '-'}</td>
+                      <td className="px-4 py-3 text-right whitespace-nowrap">
+                        <div className="flex flex-col items-end gap-1">
+                          {(tx.gr_attachments ?? []).map((url, idx) => (
+                            <a
+                              key={`${tx.id}-${idx}`}
+                              href={url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex items-center gap-1 text-xs text-blue-600 hover:underline"
+                            >
+                              <Paperclip className="w-3 h-3" /> Lampiran {idx + 1}
+                            </a>
+                          ))}
+                          {profile?.role === 'admin' && (
+                            <Button size="sm" variant="secondary" onClick={() => setEditTxId(tx.id)}>
+                              <Pencil className="w-4 h-4" /> Edit
+                            </Button>
+                          )}
+                          {/* Pengeluaran dari WO punya lembar sendiri (lihat permintaan di WO/Dashboard) */}
+                          {tx.type === 'stock_out' && !tx.work_order_id && (
+                            <Button size="sm" variant="secondary" onClick={() => printRow(tx)} disabled={busyPdf === tx.id}>
+                              <FileDown className="w-4 h-4" /> {busyPdf === tx.id ? '...' : 'PDF'}
+                            </Button>
+                          )}
+                        </div>
+                      </td>
                     </tr>
                   );
                 })}
@@ -199,19 +499,316 @@ export default function Transactions() {
         </div>
       </Card>
 
-      <Modal open={showForm} onClose={() => !acting && setShowForm(false)} title={txKind === 'stock_in' ? 'Pemasukan Barang' : 'Pengeluaran Barang'} maxWidth="max-w-2xl">
+      {editTxId && (
+        <EditTransactionModal
+          txId={editTxId}
+          onClose={() => setEditTxId(null)}
+          onSaved={async () => {
+            setEditTxId(null);
+            setNotice('Perubahan transaksi tersimpan dan tercatat di Activity Log.');
+            await load();
+          }}
+        />
+      )}
+
+      <Modal open={showReceipt} onClose={() => !acting && setShowReceipt(false)} title="Pemasukan Barang" maxWidth="max-w-3xl">
         <div className="space-y-4">
-          <div className="p-3 rounded-lg bg-slate-50 text-sm text-slate-600">Transaksi langsung diproses oleh <b>Inventory Control/Admin</b>. Tidak menggunakan approval.</div>
-          <div><Label>Spare Part *</Label><Select value={form.spare_part_id} onChange={(e) => setForm((f) => ({ ...f, spare_part_id: e.target.value }))}><option value="">Pilih spare part...</option>{parts.map((p) => <option key={p.id} value={p.id}>{p.code} - {p.name} (stok: {p.current_stock} {p.unit})</option>)}</Select></div>
-          <div className="grid grid-cols-2 gap-4">
-            <div><Label>Quantity *</Label><Input type="number" min="0.01" step="any" value={form.quantity || ''} onChange={(e) => setForm((f) => ({ ...f, quantity: Number(e.target.value) }))} /></div>
-            <div><Label>Satuan</Label><Input value={selectedPart?.unit ?? '-'} disabled className="bg-slate-50" /></div>
+          <div className="p-3 rounded-lg bg-slate-50 text-sm text-slate-600">
+            Diproses langsung oleh <b>Inventory Control/Admin</b>, tanpa approval. Semua barang dalam satu penerimaan memakai <b>satu nomor GR</b>.
+            Barang bisa ditambah manual atau <b>dipanggil dari PR</b> berdasarkan supplier.
           </div>
-          {txKind === 'stock_in' ? <div><Label>Sumber Barang</Label><Input placeholder="Supplier / retur / transfer / lainnya" value={form.source} onChange={(e) => setForm((f) => ({ ...f, source: e.target.value }))} /></div> : <div><Label>Tujuan Pengeluaran</Label><Input placeholder="WO / Produksi / Transfer / lainnya" value={form.destination} onChange={(e) => setForm((f) => ({ ...f, destination: e.target.value }))} /></div>}
-          <div><Label>Referensi</Label><Input placeholder="PO, invoice, nomor WO, dokumen, dll." value={form.reference} onChange={(e) => setForm((f) => ({ ...f, reference: e.target.value }))} /></div>
-          <div><Label>Keterangan</Label><Textarea rows={3} value={form.notes} onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))} /></div>
-          {selectedPart && <div className="p-3 border rounded-lg text-sm"><div>Stok saat ini: <b>{selectedPart.current_stock} {selectedPart.unit}</b></div><div>Stok setelah transaksi: <b>{txKind === 'stock_in' ? selectedPart.current_stock + form.quantity : selectedPart.current_stock - form.quantity} {selectedPart.unit}</b></div></div>}
-          <div className="flex justify-end gap-2"><Button variant="secondary" onClick={() => setShowForm(false)} disabled={acting}>Batal</Button><Button onClick={submitTransaction} disabled={acting}>{acting ? 'Memproses...' : 'Simpan Transaksi'}</Button></div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <Label>Jenis Penerimaan (GR) *</Label>
+              <Select
+                value={receiptForm.gr_kind}
+                onChange={(e) => {
+                  setReceiptForm((f) => ({ ...f, gr_kind: e.target.value as GRKind }));
+                  setPreviewGrNo(null);
+                }}
+              >
+                <option value="credit">{GR_KIND_LABELS.credit}</option>
+                <option value="cash">{GR_KIND_LABELS.cash}</option>
+                <option value="import">{GR_KIND_LABELS.import}</option>
+              </Select>
+            </div>
+            <div>
+              <Label>Sumber Barang</Label>
+              <Input
+                placeholder="Kosong = otomatis nama supplier PR"
+                value={receiptForm.source}
+                onChange={(e) => setReceiptForm((f) => ({ ...f, source: e.target.value }))}
+              />
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-slate-200 p-3 space-y-2">
+            <div className="flex flex-col sm:flex-row gap-2 sm:items-end">
+              <div className="flex-1">
+                <Label>Nomor GR (perkiraan)</Label>
+                <Input value={previewGrNo ?? ''} placeholder="Otomatis dibuat saat disimpan" readOnly className="bg-slate-50" />
+              </div>
+              <Button type="button" variant="secondary" onClick={previewGrNumber} disabled={acting || previewingGrNo}>
+                {previewingGrNo ? 'Memuat...' : 'Generate No. GR'}
+              </Button>
+            </div>
+            <p className="text-xs text-slate-400">Generate hanya menampilkan perkiraan nomor. Nomor baru tersimpan/terpakai saat pemasukan disimpan, dan bisa berbeda jika ada penerimaan lain yang tersimpan lebih dulu.</p>
+          </div>
+
+          {/* Recall dari PR */}
+          <div className="rounded-lg border border-blue-200 bg-blue-50/40 p-3 space-y-3">
+            <div className="flex items-center gap-2 text-sm font-semibold text-slate-800">
+              <ClipboardCheck className="w-4 h-4 text-blue-600" /> Panggil dari Purchase Requirement
+            </div>
+            {loadingPrs ? (
+              <p className="text-sm text-slate-400">Memuat PR...</p>
+            ) : recallSuppliers.length === 0 ? (
+              <p className="text-sm text-slate-400">Tidak ada PR bernomor yang masih menunggu barang.</p>
+            ) : (
+              <>
+                <div>
+                  <Label>Supplier</Label>
+                  <Select value={recallSupplier} onChange={(e) => setRecallSupplier(e.target.value)}>
+                    <option value="">Pilih supplier...</option>
+                    {recallSuppliers.map((s) => (
+                      <option key={s.id} value={s.id}>{s.label} ({s.count} PR)</option>
+                    ))}
+                  </Select>
+                </div>
+                {recallSupplier && (
+                  <div className="space-y-2">
+                    {recallPrs.map((pr) => (
+                      <div key={pr.id} className="rounded-lg bg-white border border-slate-200 p-3 space-y-2">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <div>
+                            <p className="text-sm font-semibold text-slate-900">{pr.pr_no ?? '-'}</p>
+                            <p className="text-xs text-slate-400">SAP {pr.sap_no ?? '-'} • dibuat {new Date(pr.created_at).toLocaleDateString('id-ID')}</p>
+                          </div>
+                          <Button size="sm" variant="secondary" onClick={() => recallItems(pr, pr.items)}>
+                            <Plus className="w-4 h-4" /> Panggil semua item
+                          </Button>
+                        </div>
+                        <div className="divide-y divide-slate-100">
+                          {pr.items.filter((i) => remaining(i) > 0).map((it) => {
+                            const already = receiptLines.some((l) => l.pr_item_id === it.id);
+                            return (
+                              <div key={it.id} className="flex items-center justify-between gap-2 py-1.5">
+                                <div className="min-w-0">
+                                  <p className="text-sm text-slate-800 truncate">{it.spare_part_name}</p>
+                                  <p className="text-xs text-slate-400">
+                                    Dipesan {it.quantity} • diterima {it.received_qty} • sisa <b>{remaining(it)}</b>
+                                    {!it.spare_part_id && ' • belum terhubung ke master part'}
+                                  </p>
+                                </div>
+                                <Button size="sm" variant="secondary" disabled={already || !it.spare_part_id} onClick={() => recallItems(pr, [it])}>
+                                  {already ? 'Sudah ada' : 'Tambah'}
+                                </Button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          {/* Tambah manual */}
+          <div className="rounded-lg border border-slate-200 p-3 space-y-3">
+            <div className="flex flex-col sm:flex-row gap-2 items-end">
+              <div className="flex-1 w-full">
+                <Label>Tambah Manual (cari spare part)</Label>
+                <SearchablePicker
+                  inline
+                  value={receiptPart}
+                  onChange={(v) => { setReceiptPart(v); setReceiptQty(1); }}
+                  placeholder="Cari & pilih spare part..."
+                  emptyText="Spare part tidak ditemukan"
+                  options={parts.map((p) => ({
+                    value: p.id,
+                    label: p.name,
+                    sublabel: [p.code, p.category, p.location].filter(Boolean).join(' • '),
+                    right: `${p.current_stock} ${p.unit}`,
+                    search: [p.name, p.code, p.category, p.location].filter(Boolean).join(' '),
+                  }))}
+                />
+              </div>
+              <div className="w-24">
+                <Label>Qty</Label>
+                <Input type="number" min="0.01" step="any" value={receiptQty || ''} onChange={(e) => setReceiptQty(Number(e.target.value))} />
+              </div>
+              <Button size="sm" variant="secondary" onClick={addReceiptLine} disabled={!receiptPart}>
+                <Plus className="w-4 h-4" /> Tambah
+              </Button>
+            </div>
+
+            {receiptLines.length === 0 ? (
+              <p className="text-sm text-slate-400">Belum ada barang di daftar</p>
+            ) : (
+              <div className="rounded-lg bg-slate-50 divide-y divide-slate-100">
+                {receiptLines.map((l) => {
+                  const part = parts.find((p) => p.id === l.spare_part_id);
+                  const qty = Number(l.quantity) || 0;
+                  return (
+                    <div key={l.key} className="flex items-center justify-between gap-3 px-3 py-2">
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-slate-900 truncate">{part?.name}</p>
+                        <p className="text-xs text-slate-400">
+                          {part?.code} • stok {part?.current_stock} → {(part?.current_stock ?? 0) + qty} {part?.unit}
+                          {l.pr_no && <span className="ml-1 text-blue-600">• PR {l.pr_no}{l.max !== null && ` (maks ${l.max})`}</span>}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        <Input
+                          type="number"
+                          min="0.01"
+                          step="any"
+                          max={l.max ?? undefined}
+                          value={l.quantity || ''}
+                          onChange={(e) => updateReceiptQty(l.key, Number(e.target.value))}
+                          className="w-24"
+                        />
+                        <span className="text-xs text-slate-500 w-10">{part?.unit}</span>
+                        <button onClick={() => setReceiptLines((prev) => prev.filter((x) => x.key !== l.key))} className="text-red-500 hover:text-red-700 p-1" aria-label="Hapus dari daftar">
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          <div>
+            <Label>Lampiran (foto/pdf, maks 5MB per file)</Label>
+            <Input
+              type="file"
+              accept="image/jpeg,image/png,image/webp,application/pdf"
+              multiple
+              onChange={(e) => {
+                handlePickGrFiles(e.target.files);
+                e.currentTarget.value = '';
+              }}
+            />
+            {grFiles.length > 0 && (
+              <div className="mt-2 rounded-lg border border-slate-200 divide-y divide-slate-100">
+                {grFiles.map((f, idx) => (
+                  <div key={`${f.name}-${f.lastModified}-${idx}`} className="px-3 py-2 flex items-center justify-between gap-2 text-sm">
+                    <div className="min-w-0">
+                      <p className="truncate text-slate-700">{f.name}</p>
+                      <p className="text-xs text-slate-400">{fmtSize(f.size)}</p>
+                    </div>
+                    <button type="button" onClick={() => removeGrFile(idx)} className="text-red-500 hover:text-red-700 p-1" aria-label="Hapus file">
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div><Label>Referensi</Label><Input placeholder="Kosong = otomatis nomor PR yang dipanggil" value={receiptForm.reference} onChange={(e) => setReceiptForm((f) => ({ ...f, reference: e.target.value }))} /></div>
+          <div><Label>Keterangan</Label><Textarea rows={2} value={receiptForm.notes} onChange={(e) => setReceiptForm((f) => ({ ...f, notes: e.target.value }))} /></div>
+
+          <div className="flex justify-end gap-2">
+            <Button variant="secondary" onClick={() => setShowReceipt(false)} disabled={acting}>Batal</Button>
+            <Button onClick={submitReceipt} disabled={acting || receiptLines.length === 0}>
+              {acting ? 'Memproses...' : `Simpan Pemasukan (${receiptLines.length} barang)`}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal open={showIssue} onClose={() => !acting && setShowIssue(false)} title="Pengeluaran Barang" maxWidth="max-w-2xl">
+        <div className="space-y-4">
+          <div className="p-3 rounded-lg bg-slate-50 text-sm text-slate-600">
+            Diproses langsung oleh <b>Inventory Control/Admin</b>. Semua barang dalam satu dokumen dikeluarkan bersamaan,
+            lalu <b>Lembar Pengeluaran Barang (PDF)</b> otomatis diunduh.
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <Label>Nama Penerima *</Label>
+              <Input value={issueForm.recipient} onChange={(e) => setIssueForm((f) => ({ ...f, recipient: e.target.value }))} placeholder="Nama yang menerima barang" />
+            </div>
+            <div>
+              <Label>Tujuan Pengeluaran</Label>
+              <Input value={issueForm.destination} onChange={(e) => setIssueForm((f) => ({ ...f, destination: e.target.value }))} placeholder="Produksi / Transfer / lainnya" />
+            </div>
+          </div>
+          <div>
+            <Label>Referensi</Label>
+            <Input value={issueForm.reference} onChange={(e) => setIssueForm((f) => ({ ...f, reference: e.target.value }))} placeholder="Nomor dokumen, permintaan, dll." />
+          </div>
+          <div>
+            <Label>Keperluan / Keterangan</Label>
+            <Textarea rows={2} value={issueForm.notes} onChange={(e) => setIssueForm((f) => ({ ...f, notes: e.target.value }))} />
+          </div>
+
+          <div className="rounded-lg border border-slate-200 p-3 space-y-3">
+            <div className="flex flex-col sm:flex-row gap-2 items-end">
+              <div className="flex-1 w-full">
+                <Label>Cari Spare Part</Label>
+                <SearchablePicker
+                  inline
+                  value={issuePart}
+                  onChange={(v) => { setIssuePart(v); setIssueQty(1); }}
+                  placeholder="Cari & pilih spare part..."
+                  emptyText="Spare part tidak ditemukan"
+                  options={parts.map((p) => ({
+                    value: p.id,
+                    label: p.name,
+                    sublabel: [p.code, p.category, p.location].filter(Boolean).join(' • '),
+                    right: p.current_stock <= 0 ? 'Stok habis' : `${p.current_stock} ${p.unit}`,
+                    search: [p.name, p.code, p.category, p.location].filter(Boolean).join(' '),
+                    disabled: p.current_stock <= 0,
+                  }))}
+                />
+              </div>
+              <div className="w-24">
+                <Label>Qty</Label>
+                <Input type="number" min="0.01" step="any" value={issueQty || ''} onChange={(e) => setIssueQty(Number(e.target.value))} />
+              </div>
+              <Button size="sm" variant="secondary" onClick={addIssueItem} disabled={!issuePart}>
+                <Plus className="w-4 h-4" /> Tambah
+              </Button>
+            </div>
+
+            {issueItems.length === 0 ? (
+              <p className="text-sm text-slate-400">Belum ada barang di daftar</p>
+            ) : (
+              <div className="rounded-lg bg-slate-50 divide-y divide-slate-100">
+                {issueItems.map((i) => {
+                  const part = parts.find((p) => p.id === i.spare_part_id);
+                  return (
+                    <div key={i.spare_part_id} className="flex items-center justify-between gap-3 px-3 py-2">
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-slate-900 truncate">{part?.name}</p>
+                        <p className="text-xs text-slate-400">{part?.code} • stok {part?.current_stock} → {(part?.current_stock ?? 0) - i.quantity} {part?.unit}</p>
+                      </div>
+                      <div className="flex items-center gap-3 flex-shrink-0">
+                        <span className="text-sm font-bold text-slate-900">{i.quantity} {part?.unit}</span>
+                        <button onClick={() => setIssueItems((prev) => prev.filter((x) => x.spare_part_id !== i.spare_part_id))} className="text-red-500 hover:text-red-700 p-1" aria-label="Hapus dari daftar">
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          <div className="flex justify-end gap-2">
+            <Button variant="secondary" onClick={() => setShowIssue(false)} disabled={acting}>Batal</Button>
+            <Button onClick={submitIssue} disabled={acting || issueItems.length === 0 || !issueForm.recipient.trim()}>
+              {acting ? 'Memproses...' : `Simpan & Cetak PDF (${issueItems.length} barang)`}
+            </Button>
+          </div>
         </div>
       </Modal>
 

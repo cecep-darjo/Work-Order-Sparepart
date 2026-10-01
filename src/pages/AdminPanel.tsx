@@ -3,6 +3,7 @@ import { useAuth } from '@/context/AuthContext';
 import {
   supabase,
   ROLE_LABELS,
+  GR_KIND_LABELS,
   type Role,
   type Department,
   type Area,
@@ -11,23 +12,26 @@ import {
   type PartCategory,
   type UnitOfMeasure,
   type PartLocation,
+  type InventorySupplier,
 } from '@/lib/supabase';
 import { normalizeUsername, validatePassword, validateUsername } from '@/lib/authUsername';
 import { Card, Badge, Button, Input, Select, Label, Modal, Spinner } from '@/components/ui';
-import { Building2, MapPin, Cpu, Users, Plus, Pencil, Trash2, Tag, Ruler, Warehouse } from 'lucide-react';
+import { Building2, MapPin, Cpu, Users, Plus, Pencil, Trash2, Tag, Ruler, Warehouse, Hash } from 'lucide-react';
 
-type Tab = 'departments' | 'areas' | 'equipment' | 'users' | 'categories' | 'units' | 'locations';
+type Tab = 'departments' | 'areas' | 'equipment' | 'users' | 'categories' | 'units' | 'locations' | 'suppliers' | 'gr_numbers';
 type MasterScope = 'wo' | 'inventory';
-type SimpleMaster = 'categories' | 'units' | 'locations';
+type SimpleMaster = 'categories' | 'units' | 'locations' | 'suppliers';
+type GRKind = 'credit' | 'cash' | 'import';
 const WO_TABS: Tab[] = ['departments', 'areas', 'equipment', 'users'];
-const INVENTORY_TABS: Tab[] = ['categories', 'units', 'locations'];
+const INVENTORY_TABS: Tab[] = ['categories', 'units', 'locations', 'suppliers', 'gr_numbers'];
 const SIMPLE_TABLE: Record<SimpleMaster, string> = {
   categories: 'part_categories',
   units: 'units_of_measure',
   locations: 'part_locations',
+  suppliers: 'inventory_suppliers',
 };
 function isSimpleMaster(t: Tab): t is SimpleMaster {
-  return t === 'categories' || t === 'units' || t === 'locations';
+  return t === 'categories' || t === 'units' || t === 'locations' || t === 'suppliers';
 }
 
 export default function AdminPanel({ scope }: { scope: MasterScope }) {
@@ -42,10 +46,13 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
   const [categories, setCategories] = useState<PartCategory[]>([]);
   const [units, setUnits] = useState<UnitOfMeasure[]>([]);
   const [locations, setLocations] = useState<PartLocation[]>([]);
+  const [suppliers, setSuppliers] = useState<InventorySupplier[]>([]);
+  const [grForm, setGrForm] = useState<Record<GRKind, number>>({ credit: 1, cash: 1, import: 1 });
 
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<{ type: Tab; id?: string; data?: Record<string, unknown> } | null>(null);
   const [acting, setActing] = useState(false);
+  const canEditGrStart = profile?.role === 'admin' || profile?.role === 'ss';
 
   // Form state
   const [deptForm, setDeptForm] = useState({ name: '', code: '' });
@@ -80,14 +87,25 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
       setEquipment((e as unknown as (Equipment & { area?: Area & { department?: Department } })[]) ?? []);
       setUsers((u as Profile[]) ?? []);
     } else {
-      const [{ data: cat }, { data: un }, { data: loc }] = await Promise.all([
+      const [{ data: cat }, { data: un }, { data: loc }, { data: sup }, { data: gr }] = await Promise.all([
         supabase.from('part_categories').select('*').order('name'),
         supabase.from('units_of_measure').select('*').order('name'),
         supabase.from('part_locations').select('*').order('name'),
+        supabase.from('inventory_suppliers').select('*').order('name'),
+        supabase.rpc('get_gr_start_numbers'),
       ]);
       setCategories((cat as PartCategory[]) ?? []);
       setUnits((un as UnitOfMeasure[]) ?? []);
       setLocations((loc as PartLocation[]) ?? []);
+      setSuppliers((sup as InventorySupplier[]) ?? []);
+
+      const next: Record<GRKind, number> = { credit: 1, cash: 1, import: 1 };
+      ((gr as { gr_kind: GRKind; start_no: number }[] | null) ?? []).forEach((r) => {
+        if (r?.gr_kind && ['credit', 'cash', 'import'].includes(r.gr_kind) && Number.isFinite(r.start_no)) {
+          next[r.gr_kind] = r.start_no;
+        }
+      });
+      setGrForm(next);
     }
 
     setLoading(false);
@@ -241,6 +259,40 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
     loadAll();
   }
 
+  async function saveGrStartNumbers() {
+    if (!canEditGrStart) {
+      alert('Hanya admin/SS yang dapat mengatur nomor awal GR.');
+      return;
+    }
+
+    const kinds: GRKind[] = ['credit', 'cash', 'import'];
+    for (const kind of kinds) {
+      const value = grForm[kind];
+      if (!Number.isFinite(value) || value < 1 || value > 99999) {
+        alert(`Nomor awal ${GR_KIND_LABELS[kind]} harus antara 1 sampai 99999.`);
+        return;
+      }
+    }
+
+    setActing(true);
+    try {
+      for (const kind of kinds) {
+        const { error } = await supabase.rpc('set_gr_start_number', {
+          p_gr_kind: kind,
+          p_start_no: Math.floor(grForm[kind]),
+        });
+        if (error) {
+          alert(`Gagal simpan nomor awal ${GR_KIND_LABELS[kind]}: ${error.message}`);
+          return;
+        }
+      }
+      alert('Nomor awal GR per jenis berhasil disimpan.');
+      await loadAll();
+    } finally {
+      setActing(false);
+    }
+  }
+
   if (loading) return <Spinner />;
 
   const tabs: { key: Tab; label: string; icon: typeof Building2 }[] = [
@@ -251,8 +303,12 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
     { key: 'categories', label: 'Categories', icon: Tag },
     { key: 'units', label: 'Units', icon: Ruler },
     { key: 'locations', label: 'Locations', icon: Warehouse },
+    { key: 'suppliers', label: 'Suppliers', icon: Building2 },
+    { key: 'gr_numbers', label: 'GR Numbering', icon: Hash },
   ];
-  const visibleTabs = scope === 'wo' ? WO_TABS : INVENTORY_TABS;
+  const visibleTabs = scope === 'wo'
+    ? (profile?.role === 'ss' ? WO_TABS.filter((t) => t !== 'users') : WO_TABS)
+    : INVENTORY_TABS;
 
   return (
     <div className="space-y-4">
@@ -279,9 +335,11 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
       <Card className="p-5">
         <div className="flex items-center justify-between mb-4">
           <h3 className="font-semibold text-slate-900">{tabs.find((t) => t.key === tab)?.label}</h3>
-          <Button size="sm" onClick={() => openCreate(tab)}>
-            <Plus className="w-4 h-4" /> Add
-          </Button>
+          {tab !== 'gr_numbers' && (
+            <Button size="sm" onClick={() => openCreate(tab)}>
+              <Plus className="w-4 h-4" /> Add
+            </Button>
+          )}
         </div>
 
         {tab === 'departments' && (
@@ -361,6 +419,7 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
                     <p className="text-sm font-medium text-slate-900">{u.full_name || '(no name)'}</p>
                     <Badge className={
                       u.role === 'admin' ? 'bg-red-100 text-red-700 border-red-200' :
+                      u.role === 'ss' ? 'bg-purple-100 text-purple-700 border-purple-200' :
                       u.role === 'spv' ? 'bg-blue-100 text-blue-700 border-blue-200' :
                       u.role === 'inventory' ? 'bg-teal-100 text-teal-700 border-teal-200' :
                       'bg-slate-100 text-slate-600 border-slate-200'
@@ -387,8 +446,8 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
           </div>
         )}
 
-        {(tab === 'categories' || tab === 'units' || tab === 'locations') && (() => {
-          const list = tab === 'categories' ? categories : tab === 'units' ? units : locations;
+        {(tab === 'categories' || tab === 'units' || tab === 'locations' || tab === 'suppliers') && (() => {
+          const list = tab === 'categories' ? categories : tab === 'units' ? units : tab === 'locations' ? locations : suppliers;
           return (
             <div className="space-y-2">
               {list.map((m) => (
@@ -411,6 +470,33 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
             </div>
           );
         })()}
+
+        {tab === 'gr_numbers' && (
+          <div className="space-y-4">
+            <p className="text-sm text-slate-500">Nomor awal GR diatur terpisah untuk setiap jenis. Nomor GR berikutnya = nomor GR tersimpan tertinggi tahun ini + 1; nomor awal hanya berlaku jika lebih besar dari itu (mis. untuk melanjutkan dari dokumen kertas), jadi tidak akan menabrak nomor yang sudah ada.</p>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {(['credit', 'cash', 'import'] as GRKind[]).map((kind) => (
+                <div key={kind}>
+                  <Label>{GR_KIND_LABELS[kind]}</Label>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={99999}
+                    value={grForm[kind]}
+                    disabled={!canEditGrStart || acting}
+                    onChange={(e) => setGrForm((prev) => ({ ...prev, [kind]: Number(e.target.value || 1) }))}
+                  />
+                </div>
+              ))}
+            </div>
+            {!canEditGrStart && <p className="text-xs text-slate-400">Hanya admin/SS yang dapat mengubah setting nomor awal GR.</p>}
+            <div className="flex justify-end">
+              <Button onClick={saveGrStartNumbers} disabled={!canEditGrStart || acting}>
+                {acting ? 'Saving...' : 'Simpan Nomor Awal GR'}
+              </Button>
+            </div>
+          </div>
+        )}
       </Card>
 
       {/* Form Modal */}
@@ -504,6 +590,7 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
                   <Label>Role</Label>
                   <Select value={userForm.role} onChange={(e) => setUserForm((f) => ({ ...f, role: e.target.value as Role }))}>
                     <option value="admin">Admin</option>
+                    <option value="ss">Senior Supervisor</option>
                     <option value="spv">SPV</option>
                     <option value="teknisi">Teknisi</option>
                     <option value="inventory">Inventory Control</option>

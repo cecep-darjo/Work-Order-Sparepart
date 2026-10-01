@@ -10,54 +10,6 @@ type AuthContextType = {
 };
 
 const AuthContext = createContext<AuthContextType>({
-  // Inventory Groups API
-  const fetchInventoryGroups = async () => {
-    const { data, error } = await supabase.from('inventory_groups').select('*');
-    if (error) throw error;
-    return data;
-  };
-
-  const addInventoryGroup = async (name: string, description: string) => {
-    const { data, error } = await supabase.from('inventory_groups').insert({ name, description });
-    if (error) throw error;
-    return data;
-  };
-
-  const updateInventoryGroup = async (id: number, updates: Partial<{ name: string; description: string }>) => {
-    const { data, error } = await supabase.from('inventory_groups').update(updates).eq('id', id);
-    if (error) throw error;
-    return data;
-  };
-
-  const deleteInventoryGroup = async (id: number) => {
-    const { data, error } = await supabase.from('inventory_groups').delete().eq('id', id);
-    if (error) throw error;
-    return data;
-  };
-  // Inventory Groups API
-  const fetchInventoryGroups = async () => {
-    const { data, error } = await supabase.from('inventory_groups').select('*');
-    if (error) throw error;
-    return data;
-  };
-
-  const addInventoryGroup = async (name: string, description: string) => {
-    const { data, error } = await supabase.from('inventory_groups').insert({ name, description });
-    if (error) throw error;
-    return data;
-  };
-
-  const updateInventoryGroup = async (id: number, updates: Partial<{ name: string; description: string }>) => {
-    const { data, error } = await supabase.from('inventory_groups').update(updates).eq('id', id);
-    if (error) throw error;
-    return data;
-  };
-
-  const deleteInventoryGroup = async (id: number) => {
-    const { data, error } = await supabase.from('inventory_groups').delete().eq('id', id);
-    if (error) throw error;
-    return data;
-  };
   session: null,
   profile: null,
   loading: true,

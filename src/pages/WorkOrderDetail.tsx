@@ -2,6 +2,8 @@ import { useEffect, useState, useCallback } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import {
   supabase,
+  WO_SELECT,
+  woTechnicians,
   STATUS_LABELS,
   STATUS_COLORS,
   PRIORITY_LABELS,
@@ -14,9 +16,13 @@ import {
   type WorkOrderPart,
   type Profile,
   type SparePart,
+  type InventoryGroup,
   type WOStatus,
 } from '@/lib/supabase';
 import { Card, Badge, Button, Select, Textarea, Label, Spinner, Modal, Input } from '@/components/ui';
+import { MultiPicker, SearchablePicker } from '@/components/Pickers';
+import { PartRequestCard } from '@/components/PartRequests';
+import { PR_SELECT, type PartRequest } from '@/lib/partRequests';
 import { ArrowLeft, UserCog, Play, Pause, CheckCircle2, RotateCcw, Lock, Unlock, Package, Plus, Trash2, Pencil, History as HistoryIcon } from 'lucide-react';
 
 export default function WorkOrderDetail({
@@ -34,6 +40,11 @@ export default function WorkOrderDetail({
   const [techList, setTechList] = useState<Profile[]>([]);
   const [spvList, setSpvList] = useState<Profile[]>([]);
   const [spareParts, setSpareParts] = useState<SparePart[]>([]);
+  const [groups, setGroups] = useState<InventoryGroup[]>([]);
+  const [requests, setRequests] = useState<PartRequest[]>([]);
+  const [draft, setDraft] = useState<{ spare_part_id: string; quantity: number; note: string }[]>([]);
+  const [purpose, setPurpose] = useState('');
+  const [partNote, setPartNote] = useState('');
 
   // Action form state
   const [analysis, setAnalysis] = useState('');
@@ -42,7 +53,7 @@ export default function WorkOrderDetail({
   const [pendingReason, setPendingReason] = useState('');
   const [selectedPart, setSelectedPart] = useState('');
   const [partQty, setPartQty] = useState(1);
-  const [assignTech, setAssignTech] = useState('');
+  const [assignTechs, setAssignTechs] = useState<string[]>([]);
   const [assignSpv, setAssignSpv] = useState('');
   const [interventionReason, setInterventionReason] = useState('');
   const [showIntervention, setShowIntervention] = useState(false);
@@ -58,7 +69,13 @@ export default function WorkOrderDetail({
     problem_description: '',
     priority: 'medium' as WorkOrder['priority'],
     spv_id: '',
-    technician_id: '',
+    // Khusus admin: tanggal WO, isi hasil pekerjaan, dan alasan perubahan
+    date_created: '',
+    analysis: '',
+    action_taken: '',
+    result: '',
+    pending_reason: '',
+    reason: '',
   });
   const [deptList, setDeptList] = useState<Department[]>([]);
   const [areaList, setAreaList] = useState<Area[]>([]);
@@ -71,7 +88,7 @@ export default function WorkOrderDetail({
 
     const { data: woData } = await supabase
       .from('work_orders')
-      .select('*, department:departments(*), area:areas(*), equipment:equipment(*), spv:profiles!spv_id(*), technician:profiles!technician_id(*)')
+      .select(WO_SELECT)
       .eq('id', woId)
       .maybeSingle();
     setWo(woData as unknown as WorkOrder);
@@ -94,15 +111,24 @@ export default function WorkOrderDetail({
       .order('created_at', { ascending: false });
     setParts((partsData as unknown as WorkOrderPart[]) ?? []);
 
-    const [{ data: techs }, { data: spvs }, { data: sp }] = await Promise.all([
+    const { data: reqData } = await supabase
+      .from('wo_part_requests')
+      .select(PR_SELECT)
+      .eq('work_order_id', woId)
+      .order('requested_at', { ascending: false });
+    setRequests((reqData as unknown as PartRequest[]) ?? []);
+
+    const [{ data: techs }, { data: spvs }, { data: sp }, { data: grp }] = await Promise.all([
       supabase.from('profiles').select('*').eq('role', 'teknisi').eq('is_active', true).order('full_name'),
-      supabase.from('profiles').select('*').eq('role', 'spv').eq('is_active', true).order('full_name'),
+      supabase.from('profiles').select('*').in('role', ['spv', 'ss']).eq('is_active', true).order('full_name'),
       supabase.from('spare_parts').select('*').order('name'),
+      supabase.from('inventory_groups').select('*').order('name'),
     ]);
+    setGroups((grp as InventoryGroup[]) ?? []);
     setTechList((techs as Profile[]) ?? []);
     setSpvList((spvs as Profile[]) ?? []);
     setSpareParts((sp as SparePart[]) ?? []);
-    setAssignTech(woData?.technician_id ?? '');
+    setAssignTechs(woTechnicians(woData as unknown as WorkOrder).map((t) => t.id));
     setAssignSpv(woData?.spv_id ?? '');
 
     setLoading(false);
@@ -154,43 +180,136 @@ export default function WorkOrderDetail({
     setActing(false);
   }
 
+  function techName(id: string): string {
+    const all = [...techList, ...(wo ? woTechnicians(wo) : [])];
+    return all.find((t) => t.id === id)?.full_name ?? id;
+  }
+
+  // Samakan daftar teknisi WO dengan `newIds`: hapus yang dilepas, tambah yang baru.
+  async function applyTechnicianChanges(newIds: string[]): Promise<{ ok: boolean; added: string[]; removed: string[] }> {
+    if (!wo) return { ok: false, added: [], removed: [] };
+    const current = woTechnicians(wo).map((t) => t.id);
+    const toAdd = newIds.filter((id) => !current.includes(id));
+    const toRemove = current.filter((id) => !newIds.includes(id));
+
+    if (toRemove.length > 0) {
+      const { error } = await supabase
+        .from('work_order_technicians')
+        .delete()
+        .eq('work_order_id', wo.id)
+        .in('technician_id', toRemove);
+      if (error) {
+        alert('Gagal melepas teknisi: ' + error.message);
+        return { ok: false, added: [], removed: [] };
+      }
+    }
+    if (toAdd.length > 0) {
+      const { error } = await supabase
+        .from('work_order_technicians')
+        .insert(toAdd.map((id) => ({ work_order_id: wo.id, technician_id: id })));
+      if (error) {
+        alert('Gagal menugaskan teknisi: ' + error.message);
+        return { ok: false, added: [], removed: [] };
+      }
+    }
+    return { ok: true, added: toAdd.map(techName), removed: toRemove.map(techName) };
+  }
+
+  function technicianSummary(added: string[], removed: string[]): string {
+    const parts: string[] = [];
+    if (added.length) parts.push(`Ditugaskan: ${added.join(', ')}`);
+    if (removed.length) parts.push(`Dilepas: ${removed.join(', ')}`);
+    return parts.join(' | ');
+  }
+
   async function handleAssign() {
     if (!wo) return;
-    setActing(true);
-    const updateData: Record<string, unknown> = { updated_at: new Date().toISOString() };
-    if (assignSpv) updateData.spv_id = assignSpv;
-    if (assignTech) {
-      updateData.technician_id = assignTech;
-      updateData.status = 'assigned';
+    const currentIds = woTechnicians(wo).map((t) => t.id);
+    const techChanged =
+      assignTechs.length !== currentIds.length || assignTechs.some((id) => !currentIds.includes(id));
+    const spvChanged = Boolean(assignSpv) && assignSpv !== wo.spv_id;
+    if (!techChanged && !spvChanged) {
+      alert('Tidak ada perubahan assignment.');
+      return;
     }
 
-    const { error } = await supabase.from('work_orders').update(updateData).eq('id', wo.id);
-    if (!error) {
-      await logHistory(wo.id, assignTech ? 'assigned' : wo.status, assignTech ? 'Technician assigned' : 'SPV assigned');
-      await logActivity('assign_wo', `${wo.wo_number}: assignment updated`);
-      await loadData();
+    setActing(true);
+    let added: string[] = [];
+    let removed: string[] = [];
+    if (techChanged) {
+      const res = await applyTechnicianChanges(assignTechs);
+      if (!res.ok) {
+        setActing(false);
+        await loadData();
+        return;
+      }
+      added = res.added;
+      removed = res.removed;
     }
+
+    const updateData: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    if (spvChanged) updateData.spv_id = assignSpv;
+    // Status jadi 'assigned' begitu SPV (oleh admin) atau teknisi pertama (oleh SPV) ditugaskan;
+    // kembali 'new' hanya jika tidak ada SPV maupun teknisi sama sekali.
+    const hasAssignee = Boolean(assignSpv) || assignTechs.length > 0;
+    let newStatus: WOStatus = wo.status;
+    if (wo.status === 'new' && hasAssignee) newStatus = 'assigned';
+    else if (wo.status === 'assigned' && !hasAssignee) newStatus = 'new';
+    if (newStatus !== wo.status) updateData.status = newStatus;
+
+    const { error } = await supabase.from('work_orders').update(updateData).eq('id', wo.id);
+    if (error) {
+      alert('Gagal menyimpan assignment: ' + error.message);
+    } else {
+      const summary = [technicianSummary(added, removed), spvChanged ? 'SPV diubah' : ''].filter(Boolean).join(' | ');
+      await logHistory(wo.id, newStatus, techChanged ? 'Technician assignment updated' : 'SPV assigned', summary);
+      await logActivity('assign_wo', `${wo.wo_number}: assignment updated (${summary})`);
+    }
+    await loadData();
     setActing(false);
   }
 
-  async function handleAddPart() {
-    if (!wo || !selectedPart) return;
+  function handleAddDraft() {
+    if (!selectedPart) return;
     const part = spareParts.find((p) => p.id === selectedPart);
     if (!part) return;
     if (partQty <= 0) { alert('Quantity harus lebih besar dari 0.'); return; }
-    if (partQty > part.current_stock) { alert(`Stok tidak mencukupi. Tersedia ${part.current_stock} ${part.unit}.`); return; }
+    const already = draft.find((d) => d.spare_part_id === selectedPart)?.quantity ?? 0;
+    if (already + partQty > part.current_stock) {
+      alert(`Stok tidak mencukupi. Tersedia ${part.current_stock} ${part.unit}${already ? ` (sudah ${already} di daftar)` : ''}.`);
+      return;
+    }
+    setDraft((prev) =>
+      already
+        ? prev.map((d) =>
+            d.spare_part_id === selectedPart
+              ? { ...d, quantity: d.quantity + partQty, note: partNote.trim() || d.note }
+              : d
+          )
+        : [...prev, { spare_part_id: selectedPart, quantity: partQty, note: partNote.trim() }]
+    );
+    setSelectedPart('');
+    setPartQty(1);
+    setPartNote('');
+  }
 
+  async function handleSubmitRequest() {
+    if (!wo || draft.length === 0) return;
+    if (!purpose.trim()) { alert('Keperluan wajib diisi.'); return; }
     setActing(true);
-    const { error } = await supabase.rpc('consume_work_order_part', {
+    const { data, error } = await supabase.rpc('create_part_request', {
       p_work_order_id: wo.id,
-      p_spare_part_id: selectedPart,
-      p_quantity: partQty,
+      p_purpose: purpose.trim(),
+      p_items: draft.map((d) => ({ spare_part_id: d.spare_part_id, quantity: d.quantity, note: d.note || null })),
     });
-    if (error) alert('Gagal menggunakan spare part: ' + error.message);
-    else {
-      await logHistory(wo.id, wo.status, 'Spare part added', `${part.name} x${partQty}`);
-      setSelectedPart('');
-      setPartQty(1);
+    if (error) {
+      alert('Gagal mengajukan permintaan: ' + error.message);
+    } else {
+      const req = data as { request_no?: string } | null;
+      const names = draft.map((d) => `${spareParts.find((p) => p.id === d.spare_part_id)?.name ?? '?'} x${d.quantity}`).join(', ');
+      await logHistory(wo.id, wo.status, 'Spare part requested', `${req?.request_no ?? ''}: ${names}`);
+      setDraft([]);
+      setPurpose('');
       await loadData();
     }
     setActing(false);
@@ -247,7 +366,12 @@ export default function WorkOrderDetail({
       problem_description: wo.problem_description,
       priority: wo.priority,
       spv_id: wo.spv_id ?? '',
-      technician_id: wo.technician_id ?? '',
+      date_created: (wo.date_created ?? '').slice(0, 10),
+      analysis: wo.analysis ?? '',
+      action_taken: wo.action_taken ?? '',
+      result: wo.result ?? '',
+      pending_reason: wo.pending_reason ?? '',
+      reason: '',
     });
     setAreaList([]);
     setEquipList([]);
@@ -277,6 +401,16 @@ export default function WorkOrderDetail({
       alert('Departemen dan deskripsi masalah wajib diisi.');
       return;
     }
+    const isRealAdmin = profile.role === 'admin';
+    const needReason = isRealAdmin && ['done', 'verified', 'closed'].includes(wo.status);
+    if (needReason && editForm.reason.trim().length < 3) {
+      alert('Alasan perubahan wajib diisi untuk WO yang sudah selesai/diverifikasi/ditutup.');
+      return;
+    }
+    if (isRealAdmin && !editForm.date_created) {
+      alert('Tanggal WO wajib diisi.');
+      return;
+    }
     setActing(true);
 
     const updateData: Record<string, unknown> = {
@@ -286,20 +420,32 @@ export default function WorkOrderDetail({
       problem_description: editForm.problem_description.trim(),
       priority: editForm.priority,
       spv_id: editForm.spv_id || null,
-      technician_id: editForm.technician_id || null,
       updated_at: new Date().toISOString(),
     };
-    // Sama seperti alur pembuatan/assignment: WO baru yang diberi teknisi menjadi 'assigned'.
+    if (isRealAdmin) {
+      updateData.date_created = editForm.date_created;
+      updateData.analysis = editForm.analysis.trim() || null;
+      updateData.action_taken = editForm.action_taken.trim() || null;
+      updateData.result = editForm.result.trim() || null;
+      if (wo.status === 'pending') updateData.pending_reason = editForm.pending_reason.trim() || null;
+    }
+    // Admin hanya menugaskan SPV di sini; penugasan teknisi adalah wewenang SPV (lihat kartu Assignment).
+    const currentTechCount = woTechnicians(wo).length;
+    const hasAssignee = Boolean(editForm.spv_id) || currentTechCount > 0;
     let newStatus: WOStatus = wo.status;
-    if (wo.status === 'new' && editForm.technician_id && !wo.technician_id) {
+    if (wo.status === 'new' && hasAssignee) {
       updateData.status = 'assigned';
       newStatus = 'assigned';
+    } else if (wo.status === 'assigned' && !hasAssignee) {
+      updateData.status = 'new';
+      newStatus = 'new';
     }
 
     const { error } = await supabase.from('work_orders').update(updateData).eq('id', wo.id);
     if (error) {
       alert('Gagal menyimpan perubahan: ' + error.message);
       setActing(false);
+      await loadData();
       return;
     }
 
@@ -310,11 +456,19 @@ export default function WorkOrderDetail({
     if (editForm.priority !== wo.priority) changes.push(`priority ${wo.priority} -> ${editForm.priority}`);
     if (editForm.problem_description.trim() !== wo.problem_description) changes.push('problem description');
     if ((editForm.spv_id || null) !== wo.spv_id) changes.push('SPV');
-    if ((editForm.technician_id || null) !== wo.technician_id) changes.push('technician');
+    if (isRealAdmin) {
+      const n = (v: string | null | undefined) => (v ?? '').trim();
+      if (editForm.date_created !== (wo.date_created ?? '').slice(0, 10)) changes.push(`date created ${(wo.date_created ?? '').slice(0, 10)} -> ${editForm.date_created}`);
+      if (n(editForm.analysis) !== n(wo.analysis)) changes.push('analysis');
+      if (n(editForm.action_taken) !== n(wo.action_taken)) changes.push('action taken');
+      if (n(editForm.result) !== n(wo.result)) changes.push('result');
+      if (wo.status === 'pending' && n(editForm.pending_reason) !== n(wo.pending_reason)) changes.push('pending reason');
+    }
     const summary = changes.length ? `Changed: ${changes.join(', ')}` : 'No field changed';
+    const editReason = isRealAdmin ? editForm.reason.trim() : '';
 
-    await logHistory(wo.id, newStatus, 'WO edited by admin', summary);
-    await logActivity('edit_wo', `${wo.wo_number}: edited by admin (${summary})`);
+    await logHistory(wo.id, newStatus, 'WO edited by admin', editReason ? `${summary} | Alasan: ${editReason}` : summary);
+    await logActivity('edit_wo', `${wo.wo_number}: edited by admin (${summary})`, editReason || undefined);
     setShowEdit(false);
     await loadData();
     setActing(false);
@@ -356,9 +510,25 @@ export default function WorkOrderDetail({
   if (loading) return <Spinner />;
   if (!wo) return <div className="text-center text-slate-400 py-12">Work order not found</div>;
 
-  const isAdmin = profile?.role === 'admin';
-  const isSPV = profile?.role === 'spv' && profile?.department_id === wo.department_id;
-  const isTech = profile?.role === 'teknisi' && profile?.id === wo.technician_id;
+  const isAdmin = profile?.role === 'admin' || profile?.role === 'ss';
+  const needEditReason = profile?.role === 'admin' && ['done', 'verified', 'closed'].includes(wo.status);
+  const isSPV = profile?.role === 'spv' && (profile?.department_id === wo.department_id || wo.spv_id === profile?.id);
+  const assignedTechs = woTechnicians(wo);
+  const isTech = profile?.role === 'teknisi' && assignedTechs.some((t) => t.id === profile.id);
+  // Teknisi yang sudah ditugaskan tetap muncul di pilihan walau nonaktif.
+  const techOptions = (
+    [...techList, ...assignedTechs.filter((a) => !techList.some((t) => t.id === a.id))]
+  ).map((t) => ({ value: t.id, label: t.full_name, sublabel: t.username ? `@${t.username}` : undefined }));
+  const groupName = (p: SparePart) => groups.find((g) => g.id === p.group_id)?.name ?? '';
+  const partOptions = spareParts.map((p) => ({
+    value: p.id,
+    label: p.name,
+    sublabel: [p.code, groupName(p), p.category, p.location].filter(Boolean).join(' • '),
+    right: p.current_stock <= 0 ? 'Stok habis' : `${p.current_stock} ${p.unit}`,
+    search: [p.name, p.code, p.category, groupName(p), p.location].filter(Boolean).join(' '),
+    disabled: p.current_stock <= 0,
+  }));
+  const chosenPart = spareParts.find((p) => p.id === selectedPart);
 
   return (
     <div className="space-y-4 max-w-4xl mx-auto">
@@ -387,7 +557,7 @@ export default function WorkOrderDetail({
           <InfoRow label="Equipment" value={wo.equipment?.name ?? '-'} />
           <InfoRow label="Date Created" value={new Date(wo.date_created).toLocaleDateString()} />
           <InfoRow label="SPV" value={wo.spv?.full_name ?? '-'} />
-          <InfoRow label="Technician" value={wo.technician?.full_name ?? '-'} />
+          <InfoRow label="Technician" value={assignedTechs.length ? assignedTechs.map((t) => t.full_name).join(', ') : '-'} />
         </div>
         <div>
           <p className="text-xs text-slate-400 mb-1">Problem Description</p>
@@ -395,31 +565,38 @@ export default function WorkOrderDetail({
         </div>
       </Card>
 
-      {/* Assignment section (admin & spv) */}
+      {/* Assignment section: admin menunjuk SPV, SPV yang berwenang menugaskan teknisi */}
       {(isAdmin || isSPV) && wo.status !== 'closed' && (
         <Card className="p-5">
           <h3 className="font-semibold text-slate-900 mb-3 flex items-center gap-2">
             <UserCog className="w-4 h-4" /> Assignment
           </h3>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <Label>SPV</Label>
-              <Select value={assignSpv} onChange={(e) => setAssignSpv(e.target.value)}>
-                <option value="">Select SPV...</option>
-                {spvList.map((s) => (
-                  <option key={s.id} value={s.id}>{s.full_name}</option>
-                ))}
-              </Select>
-            </div>
-            <div>
-              <Label>Technician</Label>
-              <Select value={assignTech} onChange={(e) => setAssignTech(e.target.value)}>
-                <option value="">Select technician...</option>
-                {techList.map((t) => (
-                  <option key={t.id} value={t.id}>{t.full_name}</option>
-                ))}
-              </Select>
-            </div>
+            {isAdmin && (
+              <div className="sm:col-span-2">
+                <Label>SPV (PIC Work Order)</Label>
+                <Select value={assignSpv} onChange={(e) => setAssignSpv(e.target.value)}>
+                  <option value="">Select SPV...</option>
+                  {spvList.map((s) => (
+                    <option key={s.id} value={s.id}>{s.full_name}</option>
+                  ))}
+                </Select>
+                <p className="text-xs text-slate-400 mt-1">
+                  Penugasan teknisi adalah wewenang SPV yang ditunjuk, bukan admin.
+                </p>
+              </div>
+            )}
+            {isSPV && (
+              <div className="sm:col-span-2">
+                <Label>Technician (bisa lebih dari satu)</Label>
+                <MultiPicker
+                  options={techOptions}
+                  value={assignTechs}
+                  onChange={setAssignTechs}
+                  placeholder="Cari teknisi..."
+                />
+              </div>
+            )}
           </div>
           <div className="mt-3">
             <Button size="sm" onClick={handleAssign} disabled={acting}>
@@ -566,31 +743,112 @@ export default function WorkOrderDetail({
           </div>
         )}
 
+      </Card>
+
+      {/* Permintaan spare part (perlu approval inventory) */}
+      <Card className="p-5">
+        <h3 className="font-semibold text-slate-900 mb-1 flex items-center gap-2">
+          <Package className="w-4 h-4" /> Permintaan Spare Part
+        </h3>
+        <p className="text-xs text-slate-400 mb-4">
+          Stok baru berkurang setelah PIC Inventory menyetujui permintaan. Lembar pengeluaran barang (PDF) tersedia setelah disetujui.
+        </p>
+
         {(isAdmin || isTech) && wo.status !== 'closed' && wo.status !== 'verified' && (
-          <div className="flex flex-col sm:flex-row gap-2 items-end">
-            <div className="flex-1 w-full">
-              <Label>Add Spare Part</Label>
-              <Select value={selectedPart} onChange={(e) => setSelectedPart(e.target.value)}>
-                <option value="">Select part...</option>
-                {spareParts.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name} ({p.current_stock} {p.unit} available)
-                  </option>
-                ))}
-              </Select>
+          <div className="rounded-lg border border-slate-200 p-4 mb-4 space-y-3">
+            <div className="flex flex-col sm:flex-row gap-2 items-end">
+              <div className="flex-1 w-full">
+                <Label>Cari Spare Part</Label>
+                <SearchablePicker
+                  options={partOptions}
+                  value={selectedPart}
+                  onChange={(v) => {
+                    setSelectedPart(v);
+                    setPartQty(1);
+                  }}
+                  placeholder="Cari & pilih spare part..."
+                  emptyText="Spare part tidak ditemukan"
+                />
+                {chosenPart && (
+                  <p className="text-xs text-slate-400 mt-1">
+                    {chosenPart.code}
+                    {groupName(chosenPart) ? ` • ${groupName(chosenPart)}` : ''} • Stok tersedia:{' '}
+                    <span className="font-medium text-slate-600">{chosenPart.current_stock} {chosenPart.unit}</span>
+                  </p>
+                )}
+              </div>
+              <div className="w-24">
+                <Label>Qty</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={chosenPart?.current_stock}
+                  value={partQty}
+                  onChange={(e) => setPartQty(Number(e.target.value))}
+                />
+              </div>
             </div>
-            <div className="w-24">
-              <Label>Qty</Label>
-              <Input
-                type="number"
-                min={1}
-                value={partQty}
-                onChange={(e) => setPartQty(Number(e.target.value))}
-              />
+            <div className="flex flex-col sm:flex-row gap-2 items-end">
+              <div className="flex-1 w-full">
+                <Label>Keterangan barang (opsional)</Label>
+                <Input value={partNote} onChange={(e) => setPartNote(e.target.value)} placeholder="Mis. untuk motor pompa #2" />
+              </div>
+              <Button size="sm" variant="secondary" onClick={handleAddDraft} disabled={acting || !selectedPart}>
+                <Plus className="w-4 h-4" /> Tambah ke daftar
+              </Button>
             </div>
-            <Button size="sm" onClick={handleAddPart} disabled={acting || !selectedPart}>
-              <Plus className="w-4 h-4" /> Add
-            </Button>
+
+            {draft.length > 0 && (
+              <>
+                <div className="rounded-lg bg-slate-50 divide-y divide-slate-100">
+                  {draft.map((d) => {
+                    const part = spareParts.find((p) => p.id === d.spare_part_id);
+                    return (
+                      <div key={d.spare_part_id} className="flex items-center justify-between gap-3 px-3 py-2">
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-slate-900 truncate">{part?.name}</p>
+                          <p className="text-xs text-slate-400 truncate">{part?.code}{d.note ? ` • ${d.note}` : ''}</p>
+                        </div>
+                        <div className="flex items-center gap-3 flex-shrink-0">
+                          <span className="text-sm font-bold text-slate-900">{d.quantity} {part?.unit}</span>
+                          <button
+                            onClick={() => setDraft((prev) => prev.filter((x) => x.spare_part_id !== d.spare_part_id))}
+                            className="text-red-500 hover:text-red-700 p-1"
+                            aria-label="Hapus dari daftar"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div>
+                  <Label>Keperluan *</Label>
+                  <Textarea
+                    rows={2}
+                    value={purpose}
+                    onChange={(e) => setPurpose(e.target.value)}
+                    placeholder="Jelaskan keperluan barang untuk pekerjaan ini..."
+                  />
+                </div>
+                <div className="flex justify-end">
+                  <Button onClick={handleSubmitRequest} disabled={acting || !purpose.trim()}>
+                    {acting ? 'Mengirim...' : `Ajukan Permintaan (${draft.length} barang)`}
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {requests.length === 0 ? (
+          <p className="text-sm text-slate-400">Belum ada permintaan spare part</p>
+        ) : (
+          <div className="space-y-3">
+            {requests.map((r) => (
+              <PartRequestCard key={r.id} request={r} viewer={profile!} showWO={false} onChanged={loadData} />
+            ))}
           </div>
         )}
       </Card>
@@ -718,16 +976,10 @@ export default function WorkOrderDetail({
                 ))}
               </Select>
             </div>
-            <div>
-              <Label>Technician</Label>
-              <Select value={editForm.technician_id} onChange={(e) => setEditForm((f) => ({ ...f, technician_id: e.target.value }))}>
-                <option value="">None</option>
-                {(wo.technician && !techList.some((x) => x.id === wo.technician!.id) ? [wo.technician, ...techList] : techList).map((x) => (
-                  <option key={x.id} value={x.id}>{x.full_name}</option>
-                ))}
-              </Select>
-            </div>
           </div>
+          <p className="text-xs text-slate-400 -mt-2">
+            Penugasan teknisi dilakukan oleh SPV yang ditunjuk, dari kartu Assignment di halaman ini.
+          </p>
           <div>
             <Label>Problem Description *</Label>
             <Textarea
@@ -736,13 +988,49 @@ export default function WorkOrderDetail({
               onChange={(e) => setEditForm((f) => ({ ...f, problem_description: e.target.value }))}
             />
           </div>
+          {profile?.role === 'admin' && (
+            <div className="rounded-lg border border-slate-200 p-3 space-y-3">
+              <p className="text-sm font-semibold text-slate-800">Tanggal &amp; hasil pekerjaan (khusus admin)</p>
+              <div className="sm:w-56">
+                <Label>Tanggal WO</Label>
+                <Input type="date" value={editForm.date_created} onChange={(e) => setEditForm((f) => ({ ...f, date_created: e.target.value }))} />
+              </div>
+              <div>
+                <Label>Analysis</Label>
+                <Textarea rows={2} value={editForm.analysis} onChange={(e) => setEditForm((f) => ({ ...f, analysis: e.target.value }))} />
+              </div>
+              <div>
+                <Label>Action Taken</Label>
+                <Textarea rows={2} value={editForm.action_taken} onChange={(e) => setEditForm((f) => ({ ...f, action_taken: e.target.value }))} />
+              </div>
+              <div>
+                <Label>Result</Label>
+                <Textarea rows={2} value={editForm.result} onChange={(e) => setEditForm((f) => ({ ...f, result: e.target.value }))} />
+              </div>
+              {wo.status === 'pending' && (
+                <div>
+                  <Label>Pending Reason</Label>
+                  <Textarea rows={2} value={editForm.pending_reason} onChange={(e) => setEditForm((f) => ({ ...f, pending_reason: e.target.value }))} />
+                </div>
+              )}
+              <div>
+                <Label>Alasan perubahan{needEditReason ? ' *' : ''}</Label>
+                <Textarea
+                  rows={2}
+                  value={editForm.reason}
+                  onChange={(e) => setEditForm((f) => ({ ...f, reason: e.target.value }))}
+                  placeholder={needEditReason ? 'Wajib untuk WO yang sudah selesai/diverifikasi/ditutup' : 'Opsional'}
+                />
+              </div>
+            </div>
+          )}
           <p className="text-xs text-slate-400">
             Nomor WO tidak berubah walau departemen diganti. Untuk mengubah status gunakan Change Status.
             Perubahan dicatat di History dan Activity Log.
           </p>
           <div className="flex justify-end gap-3">
             <Button variant="secondary" onClick={() => setShowEdit(false)}>Cancel</Button>
-            <Button onClick={handleSaveEdit} disabled={acting || !editForm.department_id || !editForm.problem_description.trim()}>
+            <Button onClick={handleSaveEdit} disabled={acting || !editForm.department_id || !editForm.problem_description.trim() || (needEditReason && editForm.reason.trim().length < 3)}>
               {acting ? 'Saving...' : 'Save Changes'}
             </Button>
           </div>

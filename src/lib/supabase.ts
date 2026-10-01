@@ -24,6 +24,13 @@ export interface PartCategory {
   created_at: string;
 }
 
+export interface InventoryGroup {
+  id: string;
+  code: string;
+  name: string;
+  created_at: string;
+}
+
 export interface UnitOfMeasure {
   id: string;
   code: string;
@@ -38,7 +45,14 @@ export interface PartLocation {
   created_at: string;
 }
 
-export type Role = 'admin' | 'spv' | 'teknisi' | 'inventory';
+export interface InventorySupplier {
+  id: string;
+  code: string;
+  name: string;
+  created_at: string;
+}
+
+export type Role = 'admin' | 'ss' | 'spv' | 'teknisi' | 'inventory';
 
 export type Profile = {
   id: string;
@@ -82,6 +96,7 @@ export type SparePart = {
   max_stock: number;
   current_stock: number;
   location: string | null;
+  group_id?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -102,6 +117,11 @@ export type InventoryTransaction = {
   source?: string | null;
   destination?: string | null;
   reversed_transaction_id?: string | null;
+  issue_slip_no?: string | null;
+  recipient?: string | null;
+  gr_no?: string | null;
+  gr_kind?: 'credit' | 'cash' | 'import' | null;
+  gr_attachments?: string[] | null;
   spare_part?: SparePart;
 };
 
@@ -139,7 +159,7 @@ export type WorkOrder = {
   area?: Area;
   equipment?: Equipment;
   spv?: Profile;
-  technician?: Profile;
+  technicians?: { technician: Profile | null }[];
 };
 
 export type WorkOrderPart = {
@@ -173,6 +193,27 @@ export type ActivityLog = {
   created_at: string;
   user?: Profile;
 };
+
+// Kolom teknisi utama (work_orders.technician_id) diisi otomatis oleh database; UI memakai daftar `technicians`.
+export const WO_SELECT =
+  '*, department:departments(*), area:areas(*), equipment:equipment(*), spv:profiles!spv_id(*), technicians:work_order_technicians(technician:profiles!technician_id(*))';
+
+/**
+ * Filter untuk .or(): WO yang bisa dilihat SPV — departemennya sendiri, ATAU WO manapun
+ * di mana dia ditunjuk langsung sebagai PIC (spv_id), walau beda departemen.
+ */
+export function spvOrFilter(profile: Pick<Profile, 'id' | 'department_id'>): string {
+  const parts = [`spv_id.eq.${profile.id}`];
+  if (profile.department_id) parts.push(`department_id.eq.${profile.department_id}`);
+  return parts.join(',');
+}
+
+export function woTechnicians(wo: Pick<WorkOrder, 'technicians'>): Profile[] {
+  return (wo.technicians ?? [])
+    .map((t) => t.technician)
+    .filter((t): t is Profile => Boolean(t))
+    .sort((a, b) => a.full_name.localeCompare(b.full_name));
+}
 
 export const STATUS_LABELS: Record<WOStatus, string> = {
   new: 'New',
@@ -212,6 +253,7 @@ export const PRIORITY_COLORS: Record<string, string> = {
 
 export const ROLE_LABELS: Record<Role, string> = {
   admin: 'Admin',
+  ss: 'Senior Supervisor',
   spv: 'SPV',
   teknisi: 'Teknisi',
   inventory: 'Inventory Control',
@@ -235,4 +277,10 @@ export const TX_TYPE_COLORS: Record<string, string> = {
   stock_out: 'bg-red-100 text-red-700 border-red-200',
   adjustment: 'bg-amber-100 text-amber-700 border-amber-200',
   opname: 'bg-blue-100 text-blue-700 border-blue-200',
+};
+
+export const GR_KIND_LABELS: Record<'credit' | 'cash' | 'import', string> = {
+  credit: 'Kredit (SKSB)',
+  cash: 'Cash (STSB)',
+  import: 'Import (SKIS)',
 };

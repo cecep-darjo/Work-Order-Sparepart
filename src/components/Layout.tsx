@@ -12,6 +12,7 @@ import {
   X,
   Wrench,
   Boxes,
+  FileText,
 } from 'lucide-react';
 
 export type PageKey =
@@ -20,6 +21,8 @@ export type PageKey =
   | 'inventory'
   | 'spareparts'
   | 'transactions'
+  | 'goods_receipts'
+  | 'purchase_requirements'
   | 'master_wo'
   | 'master_inventory'
   | 'activity';
@@ -30,13 +33,15 @@ const NAV_ITEMS: {
   icon: typeof LayoutDashboard;
   roles: Role[];
 }[] = [
-  { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: ['admin', 'spv', 'teknisi', 'inventory'] },
-  { key: 'workorders', label: 'Work Orders', icon: ClipboardList, roles: ['admin', 'spv', 'teknisi'] },
-  { key: 'spareparts', label: 'Spare Parts', icon: Package, roles: ['admin', 'inventory'] },
+  { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: ['admin', 'ss', 'spv', 'teknisi', 'inventory'] },
+  { key: 'workorders', label: 'Work Orders', icon: ClipboardList, roles: ['admin', 'ss', 'spv', 'teknisi'] },
+  { key: 'spareparts', label: 'Spare Parts', icon: Package, roles: ['admin', 'ss', 'inventory'] },
   { key: 'transactions', label: 'Inventory Transactions', icon: Boxes, roles: ['admin', 'inventory'] },
+  { key: 'goods_receipts', label: 'Daftar GR', icon: FileText, roles: ['admin', 'inventory'] },
   { key: 'inventory', label: 'Low Stock Alerts', icon: Package, roles: ['admin', 'inventory'] },
-  { key: 'master_wo', label: 'Master Data WO', icon: Settings, roles: ['admin'] },
-  { key: 'master_inventory', label: 'Master Data Inventory', icon: Settings, roles: ['admin'] },
+  { key: 'purchase_requirements', label: 'Purchase Requirements', icon: Package, roles: ['admin', 'ss', 'inventory'] },
+  { key: 'master_wo', label: 'Master Data WO', icon: Settings, roles: ['admin', 'ss'] },
+  { key: 'master_inventory', label: 'Master Data Inventory', icon: Settings, roles: ['admin', 'ss', 'inventory'] },
   { key: 'activity', label: 'Activity Log', icon: History, roles: ['admin'] },
 ];
 
