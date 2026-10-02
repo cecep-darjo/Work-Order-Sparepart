@@ -23,7 +23,28 @@ import { Card, Badge, Button, Select, Textarea, Label, Spinner, Modal, Input } f
 import { MultiPicker, SearchablePicker } from '@/components/Pickers';
 import { PartRequestCard } from '@/components/PartRequests';
 import { PR_SELECT, type PartRequest } from '@/lib/partRequests';
-import { ArrowLeft, UserCog, Play, Pause, CheckCircle2, RotateCcw, Lock, Unlock, Package, Plus, Trash2, Pencil, History as HistoryIcon } from 'lucide-react';
+import { downloadWoCompletionReport } from '@/lib/woReportPdf';
+import { ArrowLeft, UserCog, Play, Pause, CheckCircle2, RotateCcw, Lock, Unlock, Package, Plus, Trash2, Pencil, History as HistoryIcon, FileDown, ImagePlus, X } from 'lucide-react';
+
+const WO_PHOTO_MAX_BYTES = 500 * 1024;
+const ALLOWED_WO_PHOTO_MIME = ['image/jpeg', 'image/png', 'image/webp'];
+
+function filterWoPhotoFiles(files: File[], existing: File[]): File[] {
+  const next: File[] = [];
+  for (const f of files) {
+    if (f.size > WO_PHOTO_MAX_BYTES) {
+      alert(`File ${f.name} melebihi 500KB.`);
+      continue;
+    }
+    if (!ALLOWED_WO_PHOTO_MIME.includes(f.type)) {
+      alert(`Tipe file ${f.name} tidak didukung. Hanya JPG/PNG/WEBP.`);
+      continue;
+    }
+    const duplicate = [...existing, ...next].some((x) => x.name === f.name && x.size === f.size && x.lastModified === f.lastModified);
+    if (!duplicate) next.push(f);
+  }
+  return next;
+}
 
 export default function WorkOrderDetail({
   woId,
@@ -59,6 +80,7 @@ export default function WorkOrderDetail({
   const [showIntervention, setShowIntervention] = useState(false);
   const [interventionStatus, setInterventionStatus] = useState<WOStatus>('new');
   const [acting, setActing] = useState(false);
+  const [woPhotoFiles, setWoPhotoFiles] = useState<File[]>([]);
 
   // Edit / delete (admin)
   const [showEdit, setShowEdit] = useState(false);
@@ -161,23 +183,129 @@ export default function WorkOrderDetail({
     });
   }
 
-  async function updateStatus(newStatus: WOStatus, action: string, extraData?: Record<string, unknown>, notes?: string) {
-    if (!profile || !wo) return;
+  async function updateStatus(newStatus: WOStatus, action: string, extraData?: Record<string, unknown>, notes?: string): Promise<boolean> {
+    if (!profile || !wo) return false;
     setActing(true);
 
-    const updateData: Record<string, unknown> = { status: newStatus, updated_at: new Date().toISOString() };
-    if (extraData) Object.assign(updateData, extraData);
-    if (newStatus === 'closed') updateData.closed_at = new Date().toISOString();
-    if (newStatus !== 'pending') updateData.pending_reason = null;
+    try {
+      const updateData: Record<string, unknown> = { status: newStatus, updated_at: new Date().toISOString() };
+      if (extraData) Object.assign(updateData, extraData);
+      if (newStatus === 'closed') updateData.closed_at = new Date().toISOString();
+      if (newStatus !== 'pending') updateData.pending_reason = null;
 
-    const { error } = await supabase.from('work_orders').update(updateData).eq('id', wo.id);
+      const { error } = await supabase.from('work_orders').update(updateData).eq('id', wo.id);
+      if (error) {
+        alert('Gagal mengubah status WO: ' + error.message);
+        return false;
+      }
 
-    if (!error) {
       await logHistory(wo.id, newStatus, action, notes);
       await logActivity(action, `${wo.wo_number}: ${action}`, notes);
       await loadData();
+      return true;
+    } finally {
+      setActing(false);
     }
-    setActing(false);
+  }
+
+  async function handleGenerateReport() {
+    if (!profile) return;
+    setActing(true);
+    try {
+      const [{ data: woData }, { data: histData }, { data: partsData }] = await Promise.all([
+        supabase.from('work_orders').select(WO_SELECT).eq('id', woId).maybeSingle(),
+        supabase
+          .from('work_order_history')
+          .select('*, performer:profiles!performed_by(*)')
+          .eq('work_order_id', woId)
+          .order('performed_at', { ascending: false }),
+        supabase
+          .from('work_order_parts')
+          .select('*, spare_part:spare_parts(*)')
+          .eq('work_order_id', woId)
+          .order('created_at', { ascending: false }),
+      ]);
+
+      const woReport = woData as unknown as WorkOrder | null;
+      if (!woReport) {
+        alert('Data WO tidak ditemukan.');
+        return;
+      }
+
+      const hist = (histData as unknown as WorkOrderHistory[]) ?? [];
+      const usedParts = (partsData as unknown as WorkOrderPart[]) ?? [];
+      const verifiedEvent = [...hist]
+        .filter((h) => h.status === 'verified' || (h.action ?? '').toLowerCase().includes('verified'))
+        .sort((a, b) => new Date(b.performed_at).getTime() - new Date(a.performed_at).getTime())[0];
+
+      await downloadWoCompletionReport({
+        wo: woReport,
+        parts: usedParts,
+        history: hist,
+        technicians: woTechnicians(woReport).map((t) => t.full_name),
+        verifiedBy: verifiedEvent?.performer?.full_name ?? woReport.spv?.full_name ?? null,
+        verifiedAt: verifiedEvent?.performed_at ?? null,
+        generatedBy: profile.full_name,
+      });
+    } catch (e) {
+      alert('Gagal membuat report PDF: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setActing(false);
+    }
+  }
+
+  async function handleVerifyAndGenerateReport() {
+    const ok = await updateStatus('verified', 'WO verified by SPV');
+    if (ok) await handleGenerateReport();
+  }
+
+  function handlePickWoPhotoFiles(files: FileList | null) {
+    if (!files) return;
+    const next = filterWoPhotoFiles(Array.from(files), woPhotoFiles);
+    if (next.length > 0) setWoPhotoFiles((prev) => [...prev, ...next]);
+  }
+
+  function removeWoPhotoFile(index: number) {
+    setWoPhotoFiles((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  async function handleUploadWoPhotos() {
+    if (!profile || !wo || woPhotoFiles.length === 0) return;
+    setActing(true);
+    try {
+      const uploaded: string[] = [];
+      for (const file of woPhotoFiles) {
+        const ext = file.name.includes('.') ? file.name.split('.').pop() : '';
+        const safeBase = file.name.replace(/\.[^/.]+$/, '').replace(/[^a-zA-Z0-9_-]+/g, '-').slice(0, 60) || 'photo';
+        const objectPath = `wo/${new Date().getFullYear()}/${wo.id}/${Date.now()}-${crypto.randomUUID()}-${safeBase}${ext ? `.${ext}` : ''}`;
+        const { error: uploadError } = await supabase.storage
+          .from('wo-photo-files')
+          .upload(objectPath, file, { upsert: false, contentType: file.type });
+        if (uploadError) throw uploadError;
+        const { data } = supabase.storage.from('wo-photo-files').getPublicUrl(objectPath);
+        uploaded.push(data.publicUrl);
+      }
+
+      const merged = Array.from(new Set([...(wo.attachments ?? []), ...uploaded]));
+      const { error } = await supabase
+        .from('work_orders')
+        .update({ attachments: merged, updated_at: new Date().toISOString() })
+        .eq('id', wo.id);
+
+      if (error) {
+        alert('Gagal menyimpan lampiran foto: ' + error.message);
+        return;
+      }
+
+      await logHistory(wo.id, wo.status, 'WO photo attachment added', `${uploaded.length} foto ditambahkan`);
+      await logActivity('wo_photo_attachment', `${wo.wo_number}: ${uploaded.length} foto ditambahkan`);
+      setWoPhotoFiles([]);
+      await loadData();
+    } catch (e) {
+      alert('Gagal upload foto: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setActing(false);
+    }
   }
 
   function techName(id: string): string {
@@ -513,8 +641,10 @@ export default function WorkOrderDetail({
   const isAdmin = profile?.role === 'admin' || profile?.role === 'ss';
   const needEditReason = profile?.role === 'admin' && ['done', 'verified', 'closed'].includes(wo.status);
   const isSPV = profile?.role === 'spv' && (profile?.department_id === wo.department_id || wo.spv_id === profile?.id);
+  const canGenerateReport = profile?.role === 'spv' || profile?.role === 'ss' || profile?.role === 'admin';
   const assignedTechs = woTechnicians(wo);
   const isTech = profile?.role === 'teknisi' && assignedTechs.some((t) => t.id === profile.id);
+  const canUploadWoPhoto = isTech || isSPV;
   // Teknisi yang sudah ditugaskan tetap muncul di pilihan walau nonaktif.
   const techOptions = (
     [...techList, ...assignedTechs.filter((a) => !techList.some((t) => t.id === a.id))]
@@ -564,6 +694,74 @@ export default function WorkOrderDetail({
           <p className="text-sm text-slate-700">{wo.problem_description}</p>
         </div>
       </Card>
+
+      {/* Lampiran foto WO */}
+      {(canUploadWoPhoto || (wo.attachments?.length ?? 0) > 0) && (
+        <Card className="p-5">
+          <h3 className="font-semibold text-slate-900 mb-1 flex items-center gap-2">
+            <ImagePlus className="w-4 h-4" /> Lampiran Foto WO
+          </h3>
+          <p className="text-xs text-slate-400 mb-3">Format: JPG/PNG/WEBP, maksimal 500KB per foto.</p>
+
+          {(wo.attachments?.length ?? 0) === 0 ? (
+            <p className="text-sm text-slate-400 mb-3">Belum ada foto lampiran.</p>
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-4">
+              {(wo.attachments ?? []).map((url, idx) => (
+                <a
+                  key={`${url}-${idx}`}
+                  href={url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="block rounded-lg border border-slate-200 overflow-hidden hover:border-slate-300"
+                >
+                  <img src={url} alt={`WO attachment ${idx + 1}`} className="w-full h-24 object-cover bg-slate-100" />
+                  <p className="text-[11px] text-slate-500 px-2 py-1">Foto {idx + 1}</p>
+                </a>
+              ))}
+            </div>
+          )}
+
+          {canUploadWoPhoto && wo.status !== 'closed' && (
+            <div className="space-y-3">
+              <input
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                multiple
+                onChange={(e) => {
+                  handlePickWoPhotoFiles(e.target.files);
+                  e.currentTarget.value = '';
+                }}
+                className="block w-full text-sm text-slate-600 file:mr-3 file:px-3 file:py-2 file:rounded-md file:border-0 file:bg-slate-100 file:text-slate-700 hover:file:bg-slate-200"
+              />
+
+              {woPhotoFiles.length > 0 && (
+                <div className="rounded-lg bg-slate-50 divide-y divide-slate-100">
+                  {woPhotoFiles.map((file, idx) => (
+                    <div key={`${file.name}-${file.size}-${file.lastModified}-${idx}`} className="flex items-center justify-between gap-2 px-3 py-2">
+                      <p className="text-xs text-slate-600 truncate">{file.name} ({Math.ceil(file.size / 1024)}KB)</p>
+                      <button
+                        type="button"
+                        onClick={() => removeWoPhotoFile(idx)}
+                        className="text-slate-500 hover:text-red-600"
+                        aria-label="Hapus file"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div>
+                <Button variant="secondary" onClick={handleUploadWoPhotos} disabled={acting || woPhotoFiles.length === 0}>
+                  <ImagePlus className="w-4 h-4" /> Upload Foto WO
+                </Button>
+              </div>
+            </div>
+          )}
+        </Card>
+      )}
 
       {/* Assignment section: admin menunjuk SPV, SPV yang berwenang menugaskan teknisi */}
       {(isAdmin || isSPV) && wo.status !== 'closed' && (
@@ -647,6 +845,15 @@ export default function WorkOrderDetail({
                 />
               </div>
 
+              <div>
+                <Label>Pending Reason {wo.status !== 'pending' && <span className="text-xs font-normal text-slate-400">(wajib diisi bila WO di-set Pending)</span>}</Label>
+                <Input
+                  value={pendingReason}
+                  onChange={(e) => setPendingReason(e.target.value)}
+                  placeholder="Why is this WO pending?"
+                />
+              </div>
+
               <div className="flex flex-wrap gap-2">
                 {wo.status !== 'on_progress' && (
                   <Button
@@ -665,11 +872,11 @@ export default function WorkOrderDetail({
                 <Button
                   variant="warning"
                   onClick={() => {
-                    if (!pendingReason) {
+                    if (!pendingReason.trim()) {
                       alert('Please enter a pending reason');
                       return;
                     }
-                    updateStatus('pending', 'Set to pending', { pending_reason: pendingReason });
+                    updateStatus('pending', 'Set to pending', { pending_reason: pendingReason.trim() });
                   }}
                   disabled={acting}
                 >
@@ -698,17 +905,6 @@ export default function WorkOrderDetail({
                   <CheckCircle2 className="w-4 h-4" /> Submit Done
                 </Button>
               </div>
-
-              {wo.status === 'pending' && (
-                <div>
-                  <Label>Pending Reason</Label>
-                  <Input
-                    value={pendingReason}
-                    onChange={(e) => setPendingReason(e.target.value)}
-                    placeholder="Why is this WO pending?"
-                  />
-                </div>
-              )}
             </>
           )}
         </Card>
@@ -745,13 +941,13 @@ export default function WorkOrderDetail({
 
       </Card>
 
-      {/* Permintaan spare part (perlu approval inventory) */}
+      {/* Permintaan spare part (approval SS, lalu diproses inventory) */}
       <Card className="p-5">
         <h3 className="font-semibold text-slate-900 mb-1 flex items-center gap-2">
           <Package className="w-4 h-4" /> Permintaan Spare Part
         </h3>
         <p className="text-xs text-slate-400 mb-4">
-          Stok baru berkurang setelah PIC Inventory menyetujui permintaan. Lembar pengeluaran barang (PDF) tersedia setelah disetujui.
+          Alur: teknisi mengajukan → disetujui SS/admin → diproses pengeluaran oleh inventory/admin. Stok berkurang saat tahap proses inventory.
         </p>
 
         {(isAdmin || isTech) && wo.status !== 'closed' && wo.status !== 'verified' && (
@@ -857,14 +1053,27 @@ export default function WorkOrderDetail({
       {isSPV && wo.status === 'done' && (
         <Card className="p-5">
           <h3 className="font-semibold text-slate-900 mb-3">Verification</h3>
-          <div className="flex gap-2">
-            <Button variant="success" onClick={() => updateStatus('verified', 'WO verified by SPV')} disabled={acting}>
-              <CheckCircle2 className="w-4 h-4" /> Verify & Close
+          <div className="flex gap-2 flex-wrap">
+            <Button variant="success" onClick={handleVerifyAndGenerateReport} disabled={acting}>
+              <CheckCircle2 className="w-4 h-4" /> Verify & Generate Report
             </Button>
             <Button variant="warning" onClick={() => updateStatus('on_progress', 'Sent back for rework', {}, 'SPV requested rework')} disabled={acting}>
               <RotateCcw className="w-4 h-4" /> Request Rework
             </Button>
           </div>
+        </Card>
+      )}
+
+      {/* Report WO (SPV ke atas) */}
+      {canGenerateReport && (wo.status === 'verified' || wo.status === 'closed') && (
+        <Card className="p-5">
+          <h3 className="font-semibold text-slate-900 mb-2">Report WO</h3>
+          <p className="text-xs text-slate-500 mb-3">
+            Report PDF tersedia setelah WO selesai dan disetujui SPV.
+          </p>
+          <Button variant="secondary" onClick={handleGenerateReport} disabled={acting}>
+            <FileDown className="w-4 h-4" /> Download PDF Report
+          </Button>
         </Card>
       )}
 

@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useMemo } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import {
   supabase,
@@ -17,7 +17,14 @@ import {
   type Equipment,
 } from '@/lib/supabase';
 import { Card, Badge, Button, Input, Select, Label, Modal, Textarea, Spinner, EmptyState } from '@/components/ui';
-import { Plus, Search } from 'lucide-react';
+import { BellRing, Plus, Search } from 'lucide-react';
+import {
+  WO_ACTION_META,
+  fetchPartRequestCounts,
+  woActionsFor,
+  type WoActionKind,
+  type WoPartRequestCounts,
+} from '@/lib/actionItems';
 
 export default function WorkOrders({
   onSelectWO,
@@ -46,6 +53,8 @@ export default function WorkOrders({
   });
   const [creating, setCreating] = useState(false);
   const [onlyMine, setOnlyMine] = useState(false); // SPV: hanya WO dengan dirinya sebagai PIC
+  const [onlyAction, setOnlyAction] = useState(false); // hanya WO yang menunggu aksi user
+  const [partReqs, setPartReqs] = useState<Record<string, WoPartRequestCounts>>({});
 
   const loadWorkOrders = useCallback(async () => {
     if (!profile) return;
@@ -69,8 +78,9 @@ export default function WorkOrders({
       query = query.or(`wo_number.ilike.%${search}%,problem_description.ilike.%${search}%`);
     }
 
-    const { data } = await query;
+    const [{ data }, reqCounts] = await Promise.all([query, fetchPartRequestCounts(profile)]);
     setWorkOrders((data as unknown as WorkOrder[]) ?? []);
+    setPartReqs(reqCounts);
     setLoading(false);
   }, [profile, statusFilter, search, onlyMine]);
 
@@ -158,6 +168,23 @@ export default function WorkOrders({
     loadWorkOrders();
   }
 
+  // Aksi yang menunggu user ini pada tiap WO (assignment, approval part, verifikasi, dst.).
+  const actionsByWo = useMemo(() => {
+    const map = new Map<string, WoActionKind[]>();
+    if (!profile) return map;
+    for (const wo of workOrders) {
+      const acts = woActionsFor(wo, profile, partReqs[wo.id]);
+      if (acts.length) map.set(wo.id, acts);
+    }
+    return map;
+  }, [workOrders, partReqs, profile]);
+
+  // WO yang butuh aksi tampil paling atas; urutan lain tetap (terbaru dulu).
+  const visibleWorkOrders = useMemo(() => {
+    const list = onlyAction ? workOrders.filter((w) => actionsByWo.has(w.id)) : workOrders;
+    return [...list].sort((a, b) => Number(actionsByWo.has(b.id)) - Number(actionsByWo.has(a.id)));
+  }, [workOrders, actionsByWo, onlyAction]);
+
   if (loading) return <Spinner />;
 
   const canCreate = profile?.role === 'admin' || profile?.role === 'ss';
@@ -192,6 +219,12 @@ export default function WorkOrders({
             {onlyMine ? 'PIC Saya' : 'Semua Departemen'}
           </Button>
         )}
+        {(actionsByWo.size > 0 || onlyAction) && (
+          <Button variant={onlyAction ? 'primary' : 'secondary'} onClick={() => setOnlyAction((v) => !v)}>
+            <BellRing className="w-4 h-4" />
+            Perlu Tindakan ({actionsByWo.size})
+          </Button>
+        )}
         {canCreate && (
           <Button onClick={() => { loadCreateData(); setShowCreate(true); }}>
             <Plus className="w-4 h-4" />
@@ -201,14 +234,21 @@ export default function WorkOrders({
       </div>
 
       {/* List */}
-      {workOrders.length === 0 ? (
+      {visibleWorkOrders.length === 0 ? (
         <Card className="p-6">
-          <EmptyState message="No work orders found" />
+          <EmptyState message={onlyAction ? 'Tidak ada WO yang menunggu aksi Anda' : 'No work orders found'} />
         </Card>
       ) : (
         <div className="grid gap-3">
-          {workOrders.map((wo) => (
-            <Card key={wo.id} className="p-4 hover:shadow-md transition-shadow cursor-pointer" >
+          {visibleWorkOrders.map((wo) => {
+            const actions = actionsByWo.get(wo.id) ?? [];
+            return (
+            <Card
+              key={wo.id}
+              className={`p-4 hover:shadow-md transition-shadow cursor-pointer ${
+                actions.length > 0 ? 'border-l-4 border-l-amber-400 bg-amber-50/30' : ''
+              }`}
+            >
               <button onClick={() => onSelectWO(wo.id)} className="w-full text-left">
                 <div className="flex items-start justify-between gap-3 mb-2">
                   <div className="min-w-0 flex-1">
@@ -219,6 +259,23 @@ export default function WorkOrders({
                       </Badge>
                     </div>
                     <p className="text-sm text-slate-600 mt-1 line-clamp-2">{wo.problem_description}</p>
+                    {actions.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 mt-2">
+                        {actions.map((kind) => {
+                          const meta = WO_ACTION_META[kind];
+                          const Icon = meta.icon;
+                          return (
+                            <span
+                              key={kind}
+                              className="inline-flex items-center gap-1 rounded-full bg-amber-100 border border-amber-300 text-amber-800 px-2.5 py-0.5 text-xs font-semibold"
+                            >
+                              <Icon className="w-3 h-3" />
+                              {meta.chip}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                   <Badge className={STATUS_COLORS[wo.status] + ' flex-shrink-0'}>
                     {STATUS_LABELS[wo.status]}
@@ -239,7 +296,8 @@ export default function WorkOrders({
                 </div>
               </button>
             </Card>
-          ))}
+            );
+          })}
         </div>
       )}
 

@@ -1,7 +1,7 @@
 import { supabase, PRIORITY_LABELS } from '@/lib/supabase';
 import { renderSlipPdf, fmtDateTime, fmtQty } from '@/lib/slipPdf';
 
-export type PartRequestStatus = 'pending' | 'approved' | 'rejected' | 'cancelled';
+export type PartRequestStatus = 'pending' | 'ss_approved' | 'approved' | 'rejected' | 'cancelled';
 
 export type PartRequestItem = {
   id: string;
@@ -51,14 +51,16 @@ export const PR_SELECT =
   '*, work_order:work_orders(id, wo_number, status, problem_description, priority, department:departments(name), area:areas(name), equipment:equipment(name), technicians:work_order_technicians(technician:profiles!technician_id(full_name))), requester:profiles!requested_by(full_name), decider:profiles!decided_by(full_name), items:wo_part_request_items(*, spare_part:spare_parts(code, name, unit, current_stock, location))';
 
 export const PR_STATUS_LABELS: Record<PartRequestStatus, string> = {
-  pending: 'Menunggu Approval',
-  approved: 'Disetujui',
+  pending: 'Waiting Part Approval',
+  ss_approved: 'Menunggu Proses Inventory',
+  approved: 'Selesai Diproses Inventory',
   rejected: 'Ditolak',
   cancelled: 'Dibatalkan',
 };
 
 export const PR_STATUS_COLORS: Record<PartRequestStatus, string> = {
   pending: 'bg-amber-100 text-amber-700 border-amber-200',
+  ss_approved: 'bg-blue-100 text-blue-700 border-blue-200',
   approved: 'bg-emerald-100 text-emerald-700 border-emerald-200',
   rejected: 'bg-red-100 text-red-700 border-red-200',
   cancelled: 'bg-gray-200 text-gray-600 border-gray-300',
@@ -69,7 +71,7 @@ export async function fetchPartRequest(id: string): Promise<PartRequest | null> 
   return (data as unknown as PartRequest) ?? null;
 }
 
-/** Item yang stoknya saat ini kurang dari jumlah diminta (hanya relevan untuk status pending). */
+/** Item yang stoknya saat ini kurang dari jumlah diminta (utama untuk tahap proses inventory). */
 export function insufficientItems(req: PartRequest): PartRequestItem[] {
   return (req.items ?? []).filter((i) => (i.spare_part?.current_stock ?? 0) < i.quantity);
 }

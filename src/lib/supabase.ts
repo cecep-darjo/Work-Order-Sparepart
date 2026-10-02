@@ -216,7 +216,7 @@ export function woTechnicians(wo: Pick<WorkOrder, 'technicians'>): Profile[] {
 }
 
 export const STATUS_LABELS: Record<WOStatus, string> = {
-  new: 'New',
+  new: 'Waiting Assignment',
   assigned: 'Assigned',
   analysis: 'Analysis',
   on_progress: 'On Progress',

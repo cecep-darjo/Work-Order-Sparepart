@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { AuthProvider, useAuth } from '@/context/AuthContext';
+import { ActionItemsProvider } from '@/context/ActionItemsContext';
 import Login from '@/pages/Login';
 import Layout, { type PageKey } from '@/components/Layout';
 import Dashboard from '@/pages/Dashboard';
@@ -9,6 +10,7 @@ import SpareParts from '@/pages/SpareParts';
 import Transactions from '@/pages/Transactions';
 import PurchaseRequirements from '@/pages/PurchaseRequirements';
 import GoodsReceipts from '@/pages/GoodsReceipts';
+import Bons from '@/pages/Bons';
 import AdminPanel from '@/pages/AdminPanel';
 import ActivityLogPage from '@/pages/ActivityLogPage';
 import { Spinner } from '@/components/ui';
@@ -49,16 +51,18 @@ function AppContent() {
   }
 
   return (
+    <ActionItemsProvider refreshKey={`${page}:${selectedWO ?? ''}`}>
     <Layout currentPage={page} onNavigate={navigate}>
       {selectedWO ? (
         <WorkOrderDetail woId={selectedWO} onBack={() => setSelectedWO(null)} />
       ) : (
         <>
-          {page === 'dashboard' && <Dashboard onNavigate={navigate} />}
+          {page === 'dashboard' && <Dashboard onNavigate={navigate} onOpenWO={setSelectedWO} />}
           {page === 'workorders' && <WorkOrders onSelectWO={setSelectedWO} />}
           {page === 'spareparts' && <SpareParts />}
           {page === 'transactions' && <Transactions />}
           {page === 'goods_receipts' && <GoodsReceipts />}
+          {page === 'bons' && <Bons />}
           {page === 'purchase_requirements' && <PurchaseRequirements />}
           {page === 'inventory' && <SpareParts lowStockOnly />}
           {page === 'master_wo' && <AdminPanel scope="wo" />}
@@ -67,6 +71,7 @@ function AppContent() {
         </>
       )}
     </Layout>
+    </ActionItemsProvider>
   );
 }
 

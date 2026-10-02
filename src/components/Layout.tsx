@@ -1,6 +1,8 @@
 import { type ReactNode, useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { ROLE_LABELS, type Role } from '@/lib/supabase';
+import { useActionItemsContext } from '@/context/ActionItemsContext';
+import NotificationBell from '@/components/NotificationBell';
 import {
   LayoutDashboard,
   ClipboardList,
@@ -13,6 +15,7 @@ import {
   Wrench,
   Boxes,
   FileText,
+  ClipboardCheck,
 } from 'lucide-react';
 
 export type PageKey =
@@ -22,6 +25,7 @@ export type PageKey =
   | 'spareparts'
   | 'transactions'
   | 'goods_receipts'
+  | 'bons'
   | 'purchase_requirements'
   | 'master_wo'
   | 'master_inventory'
@@ -35,6 +39,7 @@ const NAV_ITEMS: {
 }[] = [
   { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: ['admin', 'ss', 'spv', 'teknisi', 'inventory'] },
   { key: 'workorders', label: 'Work Orders', icon: ClipboardList, roles: ['admin', 'ss', 'spv', 'teknisi'] },
+  { key: 'bons', label: 'Bon Sparepart', icon: ClipboardCheck, roles: ['admin', 'ss', 'spv', 'teknisi', 'inventory'] },
   { key: 'spareparts', label: 'Spare Parts', icon: Package, roles: ['admin', 'ss', 'inventory'] },
   { key: 'transactions', label: 'Inventory Transactions', icon: Boxes, roles: ['admin', 'inventory'] },
   { key: 'goods_receipts', label: 'Daftar GR', icon: FileText, roles: ['admin', 'inventory'] },
@@ -55,6 +60,7 @@ export default function Layout({
   children: ReactNode;
 }) {
   const { profile, signOut } = useAuth();
+  const { groups, total } = useActionItemsContext();
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   if (!profile) return null;
@@ -137,6 +143,14 @@ export default function Layout({
             </button>
             <h1 className="text-lg font-semibold text-slate-900">{currentLabel}</h1>
           </div>
+          <NotificationBell
+            groups={groups}
+            total={total}
+            onSelect={(g) => {
+              onNavigate(g.page);
+              setSidebarOpen(false);
+            }}
+          />
         </header>
 
         <main className="flex-1 overflow-y-auto p-4 sm:p-6">{children}</main>

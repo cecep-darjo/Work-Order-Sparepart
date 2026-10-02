@@ -47,15 +47,31 @@ export function PartRequestCard({
   const items = request.items ?? [];
   const wo = request.work_order;
   const isPending = request.status === 'pending';
-  const canDecide = isPending && (viewer.role === 'admin' || viewer.role === 'inventory');
+  const isSsApproved = request.status === 'ss_approved';
+  const canSsApprove = isPending && (viewer.role === 'admin' || viewer.role === 'ss');
+  const canInventoryProcess = isSsApproved && (viewer.role === 'admin' || viewer.role === 'inventory');
+  const canReject = (isPending || isSsApproved) && (viewer.role === 'admin' || viewer.role === 'ss');
   const canCancel = isPending && (request.requested_by === viewer.id || viewer.role === 'admin');
   const shortItems = insufficientItems(request);
 
-  async function approve() {
+  async function approveBySs() {
     setActing(true);
     const { error } = await supabase.rpc('approve_part_request', { p_request_id: request.id });
     if (error) {
-      alert('Gagal approve: ' + error.message);
+      alert('Gagal approve SS: ' + error.message);
+      setActing(false);
+      onChanged();
+      return;
+    }
+    setActing(false);
+    onChanged();
+  }
+
+  async function processByInventory() {
+    setActing(true);
+    const { error } = await supabase.rpc('process_part_request', { p_request_id: request.id });
+    if (error) {
+      alert('Gagal proses pengeluaran: ' + error.message);
       setActing(false);
       onChanged();
       return;
@@ -63,7 +79,7 @@ export function PartRequestCard({
     try {
       await printSlip(request.id);
     } catch (e) {
-      alert('Permintaan disetujui, tetapi PDF gagal dibuat: ' + (e instanceof Error ? e.message : String(e)));
+      alert('Pengeluaran berhasil, tetapi PDF gagal dibuat: ' + (e instanceof Error ? e.message : String(e)));
     }
     setActing(false);
     onChanged();
@@ -112,17 +128,22 @@ export function PartRequestCard({
           </p>
         </div>
         <div className="flex gap-2 flex-shrink-0 flex-wrap justify-end">
-          {canDecide && (
-            <>
-              <Button size="sm" variant="success" onClick={approve} disabled={acting || shortItems.length > 0}>
-                <Check className="w-4 h-4" /> {acting ? 'Memproses...' : 'Approve'}
-              </Button>
-              <Button size="sm" variant="secondary" onClick={() => setShowReject(true)} disabled={acting}>
-                <X className="w-4 h-4" /> Reject
-              </Button>
-            </>
+          {canSsApprove && (
+            <Button size="sm" variant="success" onClick={approveBySs} disabled={acting}>
+              <Check className="w-4 h-4" /> {acting ? 'Memproses...' : 'Approve SS'}
+            </Button>
           )}
-          {canCancel && !canDecide && (
+          {canInventoryProcess && (
+            <Button size="sm" variant="success" onClick={processByInventory} disabled={acting || shortItems.length > 0}>
+              <Check className="w-4 h-4" /> {acting ? 'Memproses...' : 'Proses Pengeluaran'}
+            </Button>
+          )}
+          {canReject && (
+            <Button size="sm" variant="secondary" onClick={() => setShowReject(true)} disabled={acting}>
+              <X className="w-4 h-4" /> Reject
+            </Button>
+          )}
+          {canCancel && !canSsApprove && (
             <Button size="sm" variant="secondary" onClick={cancel} disabled={acting}>
               <Ban className="w-4 h-4" /> Batalkan
             </Button>
@@ -151,7 +172,7 @@ export function PartRequestCard({
 
       <div className="rounded-lg bg-slate-50 divide-y divide-slate-100">
         {items.map((it) => {
-          const short = isPending && (it.spare_part?.current_stock ?? 0) < it.quantity;
+          const short = (it.spare_part?.current_stock ?? 0) < it.quantity;
           const returned = request.status === 'approved' && it.work_order_part_id === null;
           return (
             <div key={it.id} className="flex items-center justify-between gap-3 px-3 py-2">
@@ -168,7 +189,7 @@ export function PartRequestCard({
                 <p className="text-sm font-bold text-slate-900">
                   {it.quantity} {it.spare_part?.unit}
                 </p>
-                {isPending && (
+                {(isPending || isSsApproved) && (
                   <p className={`text-xs ${short ? 'text-red-600 font-medium' : 'text-slate-400'}`}>
                     Stok: {it.spare_part?.current_stock ?? 0}
                   </p>
@@ -179,16 +200,22 @@ export function PartRequestCard({
         })}
       </div>
 
-      {canDecide && shortItems.length > 0 && (
+      {(canSsApprove || canInventoryProcess) && shortItems.length > 0 && (
         <p className="text-xs text-red-600 flex items-center gap-1">
           <AlertTriangle className="w-3.5 h-3.5" />
-          Stok tidak mencukupi untuk: {shortItems.map((i) => i.spare_part?.name).join(', ')}. Approve tersedia setelah stok cukup.
+          Stok tidak mencukupi untuk: {shortItems.map((i) => i.spare_part?.name).join(', ')}.
+          {(canSsApprove && !canInventoryProcess) ? ' Approve SS tersedia setelah stok cukup.' : ' Proses pengeluaran tersedia setelah stok cukup.'}
         </p>
       )}
 
+      {request.status === 'ss_approved' && (
+        <p className="text-xs text-blue-700">
+          Disetujui SS/admin oleh {request.decider?.full_name ?? '-'} - {fmt(request.decided_at)}
+        </p>
+      )}
       {request.status === 'approved' && (
         <p className="text-xs text-slate-400">
-          Disetujui oleh {request.decider?.full_name ?? '-'} - {fmt(request.decided_at)}
+          Diproses inventory (approval SS: {request.decider?.full_name ?? '-'}) - {fmt(request.decided_at)}
         </p>
       )}
       {request.status === 'rejected' && (
@@ -230,14 +257,22 @@ export function PartRequestCard({
 export function PartRequestsInbox() {
   const { profile } = useAuth();
   const [loading, setLoading] = useState(true);
-  const [pending, setPending] = useState<PartRequest[]>([]);
+  const [queueItems, setQueueItems] = useState<PartRequest[]>([]);
   const [recent, setRecent] = useState<PartRequest[]>([]);
   const [busyPdf, setBusyPdf] = useState<string | null>(null);
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
-    const [{ data: p }, { data: r }] = await Promise.all([
-      supabase.from('wo_part_requests').select(PR_SELECT).eq('status', 'pending').order('requested_at', { ascending: true }),
+
+    const queueQuery =
+      profile?.role === 'inventory'
+        ? supabase.from('wo_part_requests').select(PR_SELECT).eq('status', 'ss_approved').order('requested_at', { ascending: true })
+        : profile?.role === 'ss'
+          ? supabase.from('wo_part_requests').select(PR_SELECT).eq('status', 'pending').order('requested_at', { ascending: true })
+          : supabase.from('wo_part_requests').select(PR_SELECT).in('status', ['pending', 'ss_approved']).order('requested_at', { ascending: true });
+
+    const [{ data: q }, { data: r }] = await Promise.all([
+      queueQuery,
       supabase
         .from('wo_part_requests')
         .select('id, request_no, decided_at, work_order:work_orders(wo_number), items:wo_part_request_items(id)')
@@ -245,17 +280,18 @@ export function PartRequestsInbox() {
         .order('decided_at', { ascending: false })
         .limit(5),
     ]);
-    setPending((p as unknown as PartRequest[]) ?? []);
+
+    setQueueItems((q as unknown as PartRequest[]) ?? []);
     setRecent((r as unknown as PartRequest[]) ?? []);
     setLoading(false);
-  }, []);
+  }, [profile?.role]);
 
   useEffect(() => {
     load();
     // Permintaan baru dari teknisi muncul otomatis tanpa perlu reload halaman.
     const timer = setInterval(() => load(true), 30000);
     return () => clearInterval(timer);
-  }, [load]);
+  }, [load, profile?.role]);
 
   if (!profile) return null;
 
@@ -275,9 +311,9 @@ export function PartRequestsInbox() {
         <h2 className="font-semibold text-slate-900 flex items-center gap-2">
           <ClipboardCheck className="w-4 h-4 text-blue-600" />
           Permintaan Spare Part dari WO
-          {pending.length > 0 && (
+          {queueItems.length > 0 && (
             <span className="inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1.5 rounded-full bg-amber-500 text-white text-xs font-bold">
-              {pending.length}
+              {queueItems.length}
             </span>
           )}
         </h2>
@@ -292,11 +328,11 @@ export function PartRequestsInbox() {
 
       {loading ? (
         <Spinner />
-      ) : pending.length === 0 ? (
-        <p className="text-sm text-slate-400 py-6 text-center">Tidak ada permintaan yang menunggu approval</p>
+      ) : queueItems.length === 0 ? (
+        <p className="text-sm text-slate-400 py-6 text-center">Tidak ada permintaan pada antrean Anda</p>
       ) : (
         <div className="space-y-3">
-          {pending.map((r) => (
+          {queueItems.map((r) => (
             <PartRequestCard key={r.id} request={r} viewer={profile} onChanged={() => load(true)} />
           ))}
         </div>

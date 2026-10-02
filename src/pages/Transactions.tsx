@@ -11,10 +11,22 @@ import {
 import { Card, Badge, Button, Select, Input, Label, Modal, Textarea, Spinner, EmptyState } from '@/components/ui';
 import { SearchablePicker } from '@/components/Pickers';
 import EditTransactionModal from '@/components/EditTransactionModal';
+import { BON_SELECT, bonRemaining, type Bon, type BonItem } from '@/lib/bons';
 import { printIssueSlipByNo, printLegacyIssue } from '@/lib/manualIssue';
 import { Search, ArrowDownToLine, ArrowUpFromLine, PackageSearch, RefreshCw, FileDown, Plus, Trash2, Paperclip, ClipboardCheck, Pencil } from 'lucide-react';
 
 type GRKind = 'credit' | 'cash' | 'import';
+
+/** Satu baris pada daftar pengeluaran. Baris dari bon membawa bon_item_id + batas sisa bon. */
+type IssueLine = {
+  key: string;
+  spare_part_id: string;
+  quantity: number;
+  bon_item_id: string | null;
+  bon_no: string | null;
+  bon_notes: string | null;
+  max: number | null;
+};
 
 /** Satu baris pada daftar pemasukan. Baris dari PR membawa pr_item_id + batas sisa PR. */
 type ReceiptLine = {
@@ -58,7 +70,12 @@ export default function Transactions() {
   const [showReceipt, setShowReceipt] = useState(false);
   const [acting, setActing] = useState(false);
   const [showIssue, setShowIssue] = useState(false);
-  const [issueItems, setIssueItems] = useState<{ spare_part_id: string; quantity: number }[]>([]);
+  const [issueItems, setIssueItems] = useState<IssueLine[]>([]);
+  const [openBons, setOpenBons] = useState<Bon[]>([]);
+  const [loadingBons, setLoadingBons] = useState(false);
+  const [bonRequester, setBonRequester] = useState('');
+  // Nilai Referensi/Keperluan yang terisi otomatis dari bon (supaya tidak menimpa ketikan manual user)
+  const [issueAuto, setIssueAuto] = useState({ notes: '', reference: '' });
   const [issuePart, setIssuePart] = useState('');
   const [issueQty, setIssueQty] = useState(1);
   const [issueForm, setIssueForm] = useState({ recipient: '', destination: '', reference: '', notes: '' });
@@ -297,42 +314,149 @@ export default function Transactions() {
     }
   }
 
-  function openIssue() {
+  async function openIssue() {
     setIssueItems([]);
     setIssuePart('');
     setIssueQty(1);
     setIssueForm({ recipient: '', destination: '', reference: '', notes: '' });
+    setBonRequester('');
+    setOpenBons([]);
+    setIssueAuto({ notes: '', reference: '' });
     setShowIssue(true);
+
+    // Bon sparepart yang masih menunggu / sebagian -> bisa dipanggil berdasarkan user pembuat bon.
+    setLoadingBons(true);
+    const { data } = await supabase
+      .from('spare_part_bons')
+      .select(BON_SELECT)
+      .in('status', ['pending', 'partial'])
+      .order('created_at', { ascending: true });
+    setOpenBons(((data as unknown as Bon[]) ?? []).filter((b) => b.items.some((i) => bonRemaining(i) > 0)));
+    setLoadingBons(false);
+  }
+
+  const bonRequesters = useMemo(() => {
+    const map = new Map<string, { id: string; label: string; count: number }>();
+    for (const b of openBons) {
+      const cur = map.get(b.requester_id);
+      if (cur) cur.count += 1;
+      else map.set(b.requester_id, { id: b.requester_id, label: b.requester?.full_name ?? '(user tidak diketahui)', count: 1 });
+    }
+    return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label));
+  }, [openBons]);
+
+  const recallBons = useMemo(() => openBons.filter((b) => b.requester_id === bonRequester), [openBons, bonRequester]);
+
+  /**
+   * Isi Referensi & Keperluan dari bon yang ada di daftar (nomor bon + keterangan bon).
+   * Hanya mengisi/menggantikan bila kolomnya kosong atau masih berisi hasil isi otomatis sebelumnya,
+   * jadi teks yang diketik manual tidak tertimpa.
+   */
+  function applyBonDefaults(lines: IssueLine[]) {
+    const uniq = (xs: (string | null)[]) => Array.from(new Set(xs.filter((x): x is string => Boolean(x))));
+    const nextNotes = uniq(lines.map((l) => l.bon_notes)).join('; ');
+    const nextRef = uniq(lines.map((l) => l.bon_no)).join(', ');
+    setIssueForm((f) => ({
+      ...f,
+      notes: f.notes.trim() === '' || f.notes === issueAuto.notes ? nextNotes : f.notes,
+      reference: f.reference.trim() === '' || f.reference === issueAuto.reference ? nextRef : f.reference,
+    }));
+    setIssueAuto({ notes: nextNotes, reference: nextRef });
+  }
+
+  function removeIssueLine(key: string) {
+    const next = issueItems.filter((x) => x.key !== key);
+    setIssueItems(next);
+    applyBonDefaults(next);
+  }
+
+  /** Tambahkan item bon ke daftar pengeluaran (qty awal = sisa bon, dibatasi stok; boleh diubah untuk pengeluaran sebagian). */
+  function recallBonItems(bon: Bon, items: BonItem[]) {
+    const added: IssueLine[] = [];
+    let noStock = 0;
+    for (const it of items) {
+      const rem = bonRemaining(it);
+      if (rem <= 0) continue;
+      if (issueItems.some((l) => l.bon_item_id === it.id)) continue;
+      const stock = Number(it.spare_part?.current_stock ?? 0);
+      if (stock <= 0) { noStock += 1; continue; }
+      added.push({
+        key: crypto.randomUUID(),
+        spare_part_id: it.spare_part_id,
+        quantity: Math.min(rem, stock),
+        bon_item_id: it.id,
+        bon_no: bon.bon_no,
+        bon_notes: bon.notes,
+        max: rem,
+      });
+    }
+    if (noStock > 0) alert(`${noStock} item tidak ditambahkan karena stok habis.`);
+    if (added.length > 0) {
+      setIssueItems((prev) => [...prev, ...added]);
+      applyBonDefaults([...issueItems, ...added]);
+      // Penerima otomatis = pembuat bon (tetap bisa diubah / diisi manual).
+      setIssueForm((f) => (f.recipient.trim() ? f : { ...f, recipient: bon.requester?.full_name ?? '' }));
+    }
   }
 
   function addIssueItem() {
     const part = parts.find((p) => p.id === issuePart);
     if (!part) return;
     if (issueQty <= 0) { alert('Quantity harus lebih besar dari 0.'); return; }
-    const already = issueItems.find((i) => i.spare_part_id === issuePart)?.quantity ?? 0;
+    const already = issueItems.filter((l) => l.spare_part_id === issuePart).reduce((sum, l) => sum + l.quantity, 0);
     if (already + issueQty > part.current_stock) {
       alert(`Stok tidak mencukupi. Tersedia ${part.current_stock} ${part.unit}${already ? ` (sudah ${already} di daftar)` : ''}.`);
       return;
     }
-    setIssueItems((prev) =>
-      already
-        ? prev.map((i) => (i.spare_part_id === issuePart ? { ...i, quantity: i.quantity + issueQty } : i))
-        : [...prev, { spare_part_id: issuePart, quantity: issueQty }]
-    );
+    setIssueItems((prev) => {
+      const existing = prev.find((l) => l.spare_part_id === issuePart && !l.bon_item_id);
+      if (existing) return prev.map((l) => (l === existing ? { ...l, quantity: l.quantity + issueQty } : l));
+      return [
+        ...prev,
+        { key: crypto.randomUUID(), spare_part_id: issuePart, quantity: issueQty, bon_item_id: null, bon_no: null, bon_notes: null, max: null },
+      ];
+    });
     setIssuePart('');
     setIssueQty(1);
+  }
+
+  function updateIssueQty(key: string, quantity: number) {
+    setIssueItems((prev) => prev.map((l) => (l.key === key ? { ...l, quantity } : l)));
   }
 
   async function submitIssue() {
     if (issueItems.length === 0) { alert('Tambahkan minimal satu barang.'); return; }
     if (!issueForm.recipient.trim()) { alert('Nama penerima wajib diisi.'); return; }
+
+    const need = new Map<string, number>();
+    for (const l of issueItems) {
+      const part = parts.find((p) => p.id === l.spare_part_id);
+      const name = part?.name ?? 'barang';
+      if (!(l.quantity > 0)) { alert(`Quantity ${name} harus lebih besar dari 0.`); return; }
+      if (l.max !== null && l.quantity > l.max) { alert(`Qty ${name} melebihi sisa bon (${l.max} ${part?.unit ?? ''}).`); return; }
+      need.set(l.spare_part_id, (need.get(l.spare_part_id) ?? 0) + l.quantity);
+    }
+    for (const [partId, qty] of Array.from(need.entries())) {
+      const part = parts.find((p) => p.id === partId);
+      if (part && qty > part.current_stock) {
+        alert(`Stok ${part.name} tidak mencukupi. Tersedia ${part.current_stock} ${part.unit}, diminta ${qty}.`);
+        return;
+      }
+    }
+
+    const uniq = (xs: (string | null)[]) => Array.from(new Set(xs.filter((x): x is string => Boolean(x))));
+    const bonNos = uniq(issueItems.map((l) => l.bon_no));
+    const bonNotes = uniq(issueItems.map((l) => l.bon_notes));
+    const reference = issueForm.reference.trim() || bonNos.join(', ');
+    const notes = issueForm.notes.trim() || bonNotes.join('; ');
+
     setActing(true);
     const { data, error } = await supabase.rpc('issue_stock_manual', {
-      p_items: issueItems,
+      p_items: issueItems.map((l) => ({ spare_part_id: l.spare_part_id, quantity: l.quantity, bon_item_id: l.bon_item_id })),
       p_recipient: issueForm.recipient.trim(),
       p_destination: issueForm.destination.trim() || null,
-      p_reference: issueForm.reference.trim() || null,
-      p_notes: issueForm.notes.trim() || null,
+      p_reference: reference || null,
+      p_notes: notes || null,
     });
     if (error) {
       setActing(false);
@@ -347,6 +471,7 @@ export default function Transactions() {
     }
     setActing(false);
     setShowIssue(false);
+    setNotice(`Pengeluaran ${slipNo} tersimpan.` + (bonNos.length > 0 ? ` Bon terkait: ${bonNos.join(', ')}.` : ''));
     await load();
   }
 
@@ -749,10 +874,72 @@ export default function Transactions() {
             <Textarea rows={2} value={issueForm.notes} onChange={(e) => setIssueForm((f) => ({ ...f, notes: e.target.value }))} />
           </div>
 
+          {/* Panggil dari Bon Sparepart (berdasarkan user pembuat bon) */}
+          <div className="rounded-lg border border-amber-200 bg-amber-50/40 p-3 space-y-3">
+            <div className="flex items-center gap-2 text-sm font-semibold text-slate-800">
+              <ClipboardCheck className="w-4 h-4 text-amber-600" /> Panggil dari Bon Sparepart
+            </div>
+            {loadingBons ? (
+              <p className="text-sm text-slate-400">Memuat bon...</p>
+            ) : bonRequesters.length === 0 ? (
+              <p className="text-sm text-slate-400">Tidak ada bon sparepart yang menunggu. Barang tetap bisa diisi manual di bawah.</p>
+            ) : (
+              <>
+                <div>
+                  <Label>User pembuat bon</Label>
+                  <Select value={bonRequester} onChange={(e) => setBonRequester(e.target.value)}>
+                    <option value="">Pilih user...</option>
+                    {bonRequesters.map((u) => (
+                      <option key={u.id} value={u.id}>{u.label} ({u.count} bon)</option>
+                    ))}
+                  </Select>
+                </div>
+                {bonRequester && (
+                  <div className="space-y-2">
+                    {recallBons.map((bon) => (
+                      <div key={bon.id} className="rounded-lg bg-white border border-slate-200 p-3 space-y-2">
+                        <div className="flex items-start justify-between gap-2 flex-wrap">
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-slate-900">{bon.bon_no}</p>
+                            <p className="text-xs text-slate-500">{bon.notes}</p>
+                            <p className="text-xs text-slate-400">{new Date(bon.created_at).toLocaleDateString('id-ID')}</p>
+                          </div>
+                          <Button size="sm" variant="secondary" onClick={() => recallBonItems(bon, bon.items)}>
+                            <Plus className="w-4 h-4" /> Panggil semua item
+                          </Button>
+                        </div>
+                        <div className="divide-y divide-slate-100">
+                          {bon.items.filter((i) => bonRemaining(i) > 0).map((it) => {
+                            const already = issueItems.some((l) => l.bon_item_id === it.id);
+                            const stock = Number(it.spare_part?.current_stock ?? 0);
+                            return (
+                              <div key={it.id} className="flex items-center justify-between gap-2 py-1.5">
+                                <div className="min-w-0">
+                                  <p className="text-sm text-slate-800 truncate">{it.spare_part?.name}</p>
+                                  <p className="text-xs text-slate-400">
+                                    Diminta {it.quantity} • keluar {it.issued_qty} • sisa <b>{bonRemaining(it)}</b> • stok {stock} {it.spare_part?.unit}
+                                  </p>
+                                </div>
+                                <Button size="sm" variant="secondary" disabled={already || stock <= 0} onClick={() => recallBonItems(bon, [it])}>
+                                  {already ? 'Sudah ada' : stock <= 0 ? 'Stok habis' : 'Tambah'}
+                                </Button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+            <p className="text-xs text-slate-400">Penerima yang tidak punya user (bukan pembuat bon) tetap bisa diisi manual: isi nama penerima dan tambahkan barang di bawah.</p>
+          </div>
+
           <div className="rounded-lg border border-slate-200 p-3 space-y-3">
             <div className="flex flex-col sm:flex-row gap-2 items-end">
               <div className="flex-1 w-full">
-                <Label>Cari Spare Part</Label>
+                <Label>Tambah Manual (cari spare part)</Label>
                 <SearchablePicker
                   inline
                   value={issuePart}
@@ -782,17 +969,30 @@ export default function Transactions() {
               <p className="text-sm text-slate-400">Belum ada barang di daftar</p>
             ) : (
               <div className="rounded-lg bg-slate-50 divide-y divide-slate-100">
-                {issueItems.map((i) => {
-                  const part = parts.find((p) => p.id === i.spare_part_id);
+                {issueItems.map((l) => {
+                  const part = parts.find((p) => p.id === l.spare_part_id);
+                  const qty = Number(l.quantity) || 0;
                   return (
-                    <div key={i.spare_part_id} className="flex items-center justify-between gap-3 px-3 py-2">
+                    <div key={l.key} className="flex items-center justify-between gap-3 px-3 py-2">
                       <div className="min-w-0">
                         <p className="text-sm font-medium text-slate-900 truncate">{part?.name}</p>
-                        <p className="text-xs text-slate-400">{part?.code} • stok {part?.current_stock} → {(part?.current_stock ?? 0) - i.quantity} {part?.unit}</p>
+                        <p className="text-xs text-slate-400">
+                          {part?.code} • stok {part?.current_stock} → {(part?.current_stock ?? 0) - qty} {part?.unit}
+                          {l.bon_no && <span className="ml-1 text-amber-700">• {l.bon_no}{l.max !== null && ` (maks ${l.max})`}</span>}
+                        </p>
                       </div>
-                      <div className="flex items-center gap-3 flex-shrink-0">
-                        <span className="text-sm font-bold text-slate-900">{i.quantity} {part?.unit}</span>
-                        <button onClick={() => setIssueItems((prev) => prev.filter((x) => x.spare_part_id !== i.spare_part_id))} className="text-red-500 hover:text-red-700 p-1" aria-label="Hapus dari daftar">
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        <Input
+                          type="number"
+                          min="0.01"
+                          step="any"
+                          max={l.max ?? undefined}
+                          value={l.quantity || ''}
+                          onChange={(e) => updateIssueQty(l.key, Number(e.target.value))}
+                          className="w-24"
+                        />
+                        <span className="text-xs text-slate-500 w-10">{part?.unit}</span>
+                        <button onClick={() => removeIssueLine(l.key)} className="text-red-500 hover:text-red-700 p-1" aria-label="Hapus dari daftar">
                           <Trash2 className="w-4 h-4" />
                         </button>
                       </div>
