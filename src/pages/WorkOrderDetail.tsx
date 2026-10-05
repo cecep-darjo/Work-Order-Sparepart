@@ -28,7 +28,7 @@ import { PartRequestCard } from '@/components/PartRequests';
 import { PR_SELECT, type PartRequest } from '@/lib/partRequests';
 import { downloadWoCompletionReport } from '@/lib/woReportPdf';
 import { fetchWoHistory, fmtWoTime, woWorkTimes } from '@/lib/woHistory';
-import { ArrowLeft, UserCog, Play, Pause, CheckCircle2, RotateCcw, Lock, Unlock, Package, Plus, Trash2, Pencil, History as HistoryIcon, FileDown, ImagePlus, X } from 'lucide-react';
+import { ArrowLeft, UserCog, Play, Pause, CheckCircle2, RotateCcw, Lock, Unlock, Package, Plus, Trash2, Pencil, History as HistoryIcon, FileDown, ImagePlus, X, XCircle, Undo2 } from 'lucide-react';
 
 const WO_PHOTO_MAX_BYTES = 500 * 1024;
 const ALLOWED_WO_PHOTO_MIME = ['image/jpeg', 'image/png', 'image/webp'];
@@ -108,8 +108,10 @@ export default function WorkOrderDetail({
   const [deptList, setDeptList] = useState<Department[]>([]);
   const [areaList, setAreaList] = useState<Area[]>([]);
   const [equipList, setEquipList] = useState<Equipment[]>([]);
-  const [showDelete, setShowDelete] = useState(false);
-  const [deleteReason, setDeleteReason] = useState('');
+  const [showCancel, setShowCancel] = useState(false);
+  const [cancelReason, setCancelReason] = useState('');
+  const [showReactivate, setShowReactivate] = useState(false);
+  const [reactivateReason, setReactivateReason] = useState('');
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -603,22 +605,40 @@ export default function WorkOrderDetail({
     setActing(false);
   }
 
-  async function handleDeleteWO() {
-    if (!wo || !deleteReason.trim()) return;
+  async function handleCancelWO() {
+    if (!wo || !cancelReason.trim()) return;
     setActing(true);
-    const { error } = await supabase.rpc('admin_delete_work_order', {
+    const { error } = await supabase.rpc('admin_cancel_work_order', {
       p_wo_id: wo.id,
-      p_reason: deleteReason.trim(),
+      p_reason: cancelReason.trim(),
     });
     if (error) {
-      alert('Gagal menghapus WO: ' + error.message);
+      alert('Gagal membatalkan WO: ' + error.message);
       setActing(false);
       return;
     }
     setActing(false);
-    setShowDelete(false);
-    setDeleteReason('');
-    onBack();
+    setShowCancel(false);
+    setCancelReason('');
+    await loadData();
+  }
+
+  async function handleReactivateWO() {
+    if (!wo || !reactivateReason.trim()) return;
+    setActing(true);
+    const { error } = await supabase.rpc('admin_reactivate_work_order', {
+      p_wo_id: wo.id,
+      p_reason: reactivateReason.trim(),
+    });
+    if (error) {
+      alert('Gagal mengaktifkan kembali WO: ' + error.message);
+      setActing(false);
+      return;
+    }
+    setActing(false);
+    setShowReactivate(false);
+    setReactivateReason('');
+    await loadData();
   }
 
   async function handleReopen() {
@@ -646,6 +666,7 @@ export default function WorkOrderDetail({
   const assignedTechs = woTechnicians(wo);
   const isTech = profile?.role === 'teknisi' && assignedTechs.some((t) => t.id === profile.id);
   const canUploadWoPhoto = isTech || isSPV;
+  const isCanceled = wo.status === 'canceled';
   // Teknisi yang sudah ditugaskan tetap muncul di pilihan walau nonaktif.
   const techOptions = (
     [...techList, ...assignedTechs.filter((a) => !techList.some((t) => t.id === a.id))]
@@ -684,6 +705,15 @@ export default function WorkOrderDetail({
           </p>
         </div>
       </div>
+
+      {isCanceled && (
+        <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3">
+          <p className="text-sm text-rose-700">
+            <span className="font-semibold">Work Order dibatalkan.</span>{' '}
+            {wo.cancel_reason ? `Alasan: ${wo.cancel_reason}` : 'WO ini tidak perlu diproses lebih lanjut.'}
+          </p>
+        </div>
+      )}
 
       {/* Info Card */}
       <Card className="p-5 space-y-3">
@@ -732,7 +762,7 @@ export default function WorkOrderDetail({
             </div>
           )}
 
-          {canUploadWoPhoto && wo.status !== 'closed' && (
+          {canUploadWoPhoto && wo.status !== 'closed' && wo.status !== 'canceled' && (
             <div className="space-y-3">
               <input
                 type="file"
@@ -774,7 +804,7 @@ export default function WorkOrderDetail({
       )}
 
       {/* Assignment section: admin menunjuk SPV, SPV yang berwenang menugaskan teknisi */}
-      {(isAdmin || isSPV) && wo.status !== 'closed' && (
+      {(isAdmin || isSPV) && wo.status !== 'closed' && wo.status !== 'canceled' && (
         <Card className="p-5">
           <h3 className="font-semibold text-slate-900 mb-3 flex items-center gap-2">
             <UserCog className="w-4 h-4" /> Assignment
@@ -815,7 +845,7 @@ export default function WorkOrderDetail({
       )}
 
       {/* Teknisi actions */}
-      {isTech && wo.status !== 'closed' && wo.status !== 'verified' && (
+      {isTech && wo.status !== 'closed' && wo.status !== 'verified' && wo.status !== 'canceled' && (
         <Card className="p-5 space-y-4">
           <h3 className="font-semibold text-slate-900">Work Execution</h3>
 
@@ -935,7 +965,7 @@ export default function WorkOrderDetail({
                   <p className="text-sm font-medium text-slate-900">{p.spare_part?.name}</p>
                   <p className="text-xs text-slate-400">{p.spare_part?.code} • {p.quantity} {p.spare_part?.unit}</p>
                 </div>
-                {(isAdmin || isTech) && wo.status !== 'closed' && (
+                {(isAdmin || isTech) && wo.status !== 'closed' && wo.status !== 'canceled' && (
                   <button
                     onClick={() => handleRemovePart(p.id, p.spare_part_id, p.quantity)}
                     disabled={acting}
@@ -960,7 +990,7 @@ export default function WorkOrderDetail({
           Alur: teknisi mengajukan → disetujui SS/admin → diproses pengeluaran oleh inventory/admin. Stok berkurang saat tahap proses inventory.
         </p>
 
-        {(isAdmin || isTech) && wo.status !== 'closed' && wo.status !== 'verified' && (
+        {(isAdmin || isTech) && wo.status !== 'closed' && wo.status !== 'verified' && wo.status !== 'canceled' && (
           <div className="rounded-lg border border-slate-200 p-4 mb-4 space-y-3">
             <div className="flex flex-col sm:flex-row gap-2 items-end">
               <div className="flex-1 w-full">
@@ -1110,9 +1140,17 @@ export default function WorkOrderDetail({
                 <Lock className="w-4 h-4" /> Close WO
               </Button>
             )}
-            <Button variant="danger" size="sm" onClick={() => setShowDelete(true)} disabled={acting}>
-              <Trash2 className="w-4 h-4" /> Delete WO
-            </Button>
+            {wo.status === 'canceled' ? (
+              <Button variant="success" size="sm" onClick={() => setShowReactivate(true)} disabled={acting}>
+                <Undo2 className="w-4 h-4" /> Reactivate WO
+              </Button>
+            ) : (
+              wo.status !== 'closed' && wo.status !== 'verified' && (
+                <Button variant="danger" size="sm" onClick={() => setShowCancel(true)} disabled={acting}>
+                  <XCircle className="w-4 h-4" /> Cancel WO
+                </Button>
+              )
+            )}
           </div>
         </Card>
       )}
@@ -1279,30 +1317,63 @@ export default function WorkOrderDetail({
         </div>
       </Modal>
 
-      {/* Delete modal */}
-      <Modal open={showDelete} onClose={() => setShowDelete(false)} title="Delete Work Order">
+      {/* Cancel modal */}
+      <Modal open={showCancel} onClose={() => setShowCancel(false)} title="Cancel Work Order">
         <div className="space-y-4">
           <p className="text-sm text-slate-700">
-            Hapus <span className="font-semibold">{wo.wo_number}</span>? Riwayat dan daftar spare part WO ini akan ikut terhapus.
-            {parts.length > 0 && ' Spare part yang sudah terpakai akan dikembalikan ke stok.'} Tindakan ini tidak bisa dibatalkan.
+            Batalkan <span className="font-semibold">{wo?.wo_number}</span>? WO tidak akan dihapus,
+            hanya tidak perlu diproses lebih lanjut (status menjadi <b>Canceled</b>) dan bisa diaktifkan
+            kembali oleh admin.
           </p>
           <div>
-            <Label>Alasan penghapusan *</Label>
+            <Label>Alasan pembatalan *</Label>
             <Textarea
               rows={3}
-              value={deleteReason}
-              onChange={(e) => setDeleteReason(e.target.value)}
-              placeholder="Mis. WO dobel / salah input..."
+              value={cancelReason}
+              onChange={(e) => setCancelReason(e.target.value)}
+              placeholder="Mis. pekerjaan tidak jadi dilaksanakan..."
             />
           </div>
           <div className="flex justify-end gap-3">
-            <Button variant="secondary" onClick={() => setShowDelete(false)}>Cancel</Button>
-            <Button variant="danger" onClick={handleDeleteWO} disabled={acting || !deleteReason.trim()}>
-              {acting ? 'Deleting...' : 'Delete WO'}
+            <Button variant="secondary" onClick={() => setShowCancel(false)}>Kembali</Button>
+            <Button variant="danger" onClick={handleCancelWO} disabled={acting || !cancelReason.trim()}>
+              {acting ? 'Membatalkan...' : 'Cancel WO'}
             </Button>
           </div>
           <p className="text-xs text-slate-400">
-            Penghapusan dicatat di Activity Log beserta nama Anda dan alasan di atas.
+            Pembatalan dicatat di Activity Log beserta nama Anda dan alasan di atas.
+          </p>
+        </div>
+      </Modal>
+
+      {/* Reactivate modal */}
+      <Modal open={showReactivate} onClose={() => setShowReactivate(false)} title="Reactivate Work Order">
+        <div className="space-y-4">
+          <p className="text-sm text-slate-700">
+            Aktifkan kembali <span className="font-semibold">{wo?.wo_number}</span>? Status WO akan
+            dikembalikan menjadi <b>Waiting Assignment (new)</b>. Assignment SPV/teknisi &amp;
+            permintaan part yang ada dipertahankan.
+          </p>
+          <div>
+            <Label>Alasan reaktivasi *</Label>
+            <Textarea
+              rows={3}
+              value={reactivateReason}
+              onChange={(e) => setReactivateReason(e.target.value)}
+              placeholder="Mis. pekerjaan dilanjutkan kembali..."
+            />
+          </div>
+          <div className="flex justify-end gap-3">
+            <Button variant="secondary" onClick={() => setShowReactivate(false)}>Kembali</Button>
+            <Button variant="success" onClick={handleReactivateWO} disabled={acting || !reactivateReason.trim()}>
+              {acting ? 'Mengaktifkan...' : 'Reactivate WO'}
+            </Button>
+          </div>
+          <p className="text-xs text-slate-400">
+            Reaktivasi dicatat di Activity Log beserta nama Anda dan alasan di atas.
+          </p>
+        </div>
+      </Modal>
           </p>
         </div>
       </Modal>

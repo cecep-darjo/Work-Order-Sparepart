@@ -133,7 +133,8 @@ export type WOStatus =
   | 'pending'
   | 'done'
   | 'verified'
-  | 'closed';
+  | 'closed'
+  | 'canceled';
 
 export type WorkOrder = {
   id: string;
@@ -156,6 +157,7 @@ export type WorkOrder = {
   action_taken: string | null;
   result: string | null;
   pending_reason: string | null;
+  cancel_reason: string | null;
   attachments: string[] | null;
   closed_at: string | null;
   updated_at: string;
@@ -228,6 +230,7 @@ export const STATUS_LABELS: Record<WOStatus, string> = {
   done: 'Done',
   verified: 'Verified',
   closed: 'Closed',
+  canceled: 'Canceled',
 };
 
 export const STATUS_COLORS: Record<WOStatus, string> = {
@@ -239,6 +242,7 @@ export const STATUS_COLORS: Record<WOStatus, string> = {
   done: 'bg-teal-100 text-teal-700 border-teal-200',
   verified: 'bg-emerald-100 text-emerald-700 border-emerald-200',
   closed: 'bg-gray-200 text-gray-600 border-gray-300',
+  canceled: 'bg-rose-100 text-rose-700 border-rose-200',
 };
 
 export const PRIORITY_LABELS: Record<string, string> = {

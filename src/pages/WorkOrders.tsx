@@ -311,6 +311,11 @@ export default function WorkOrders({
                         <span className="font-semibold">Alasan Pending:</span> {wo.pending_reason}
                       </p>
                     )}
+                    {wo.status === 'canceled' && wo.cancel_reason && (
+                      <p className="text-xs text-rose-600 bg-rose-50 border border-rose-200 rounded-md px-2.5 py-1.5 mt-2">
+                        <span className="font-semibold">Alasan Cancel:</span> {wo.cancel_reason}
+                      </p>
+                    )}
                     {actions.length > 0 && (
                       <div className="flex flex-wrap gap-1.5 mt-2">
                         {actions.map((kind) => {
