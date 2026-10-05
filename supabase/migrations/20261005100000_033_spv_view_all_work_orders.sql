@@ -22,7 +22,7 @@ Catatan:
 DROP POLICY IF EXISTS "read_work_orders" ON public.work_orders;
 CREATE POLICY "read_work_orders" ON public.work_orders FOR SELECT
   TO authenticated USING (
-    EXISTS (SELECT 1 FROM public.profiles p WHERE p.id = auth.uid() AND p.role IN ('admin','inventory'))
+    EXISTS (SELECT 1 FROM public.profiles p WHERE p.id = auth.uid() AND p.role IN ('admin','ss','inventory'))
     OR
     EXISTS (SELECT 1 FROM public.profiles p WHERE p.id = auth.uid() AND p.role = 'spv')
     OR

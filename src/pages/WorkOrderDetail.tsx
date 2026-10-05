@@ -92,7 +92,7 @@ export default function WorkOrderDetail({
     area_id: '',
     equipment_id: '',
     problem_description: '',
-    priority: 'medium' as WorkOrder['priority'],
+    priority: 'standard' as WorkOrder['priority'],
     spv_id: '',
     // Khusus admin: tanggal WO, isi hasil pekerjaan, dan alasan perubahan
     date_created: '',

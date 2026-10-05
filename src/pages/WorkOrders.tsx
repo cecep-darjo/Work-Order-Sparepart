@@ -54,7 +54,7 @@ export default function WorkOrders({
     area_id: '',
     equipment_id: '',
     problem_description: '',
-    priority: 'medium' as 'low' | 'medium' | 'high' | 'urgent',
+    priority: 'standard' as 'standard' | 'urgent',
     spv_id: '',
     requester_id: '',
     requester_name: '',
@@ -196,7 +196,7 @@ export default function WorkOrders({
       area_id: '',
       equipment_id: '',
       problem_description: '',
-      priority: 'medium',
+      priority: 'standard',
       spv_id: '',
       requester_id: '',
       requester_name: '',
@@ -443,11 +443,9 @@ export default function WorkOrders({
             <Label>Priority</Label>
             <Select
               value={createForm.priority}
-              onChange={(e) => setCreateForm((f) => ({ ...f, priority: e.target.value as 'low' | 'medium' | 'high' | 'urgent' }))}
+              onChange={(e) => setCreateForm((f) => ({ ...f, priority: e.target.value as 'standard' | 'urgent' }))}
             >
-              <option value="low">Low</option>
-              <option value="medium">Medium</option>
-              <option value="high">High</option>
+              <option value="standard">Standard</option>
               <option value="urgent">Urgent</option>
             </Select>
           </div>

@@ -144,7 +144,7 @@ export type WorkOrder = {
   area_id: string | null;
   equipment_id: string | null;
   problem_description: string;
-  priority: 'low' | 'medium' | 'high' | 'urgent';
+  priority: 'standard' | 'urgent';
   status: WOStatus;
   spv_id: string | null;
   technician_id: string | null;
@@ -241,16 +241,12 @@ export const STATUS_COLORS: Record<WOStatus, string> = {
 };
 
 export const PRIORITY_LABELS: Record<string, string> = {
-  low: 'Low',
-  medium: 'Medium',
-  high: 'High',
+  standard: 'Standard',
   urgent: 'Urgent',
 };
 
 export const PRIORITY_COLORS: Record<string, string> = {
-  low: 'bg-slate-100 text-slate-600 border-slate-200',
-  medium: 'bg-blue-100 text-blue-700 border-blue-200',
-  high: 'bg-orange-100 text-orange-700 border-orange-200',
+  standard: 'bg-blue-100 text-blue-700 border-blue-200',
   urgent: 'bg-red-100 text-red-700 border-red-200',
 };
 
