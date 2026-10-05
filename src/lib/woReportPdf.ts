@@ -1,5 +1,5 @@
 import { woWorkTimes } from '@/lib/woHistory';
-import { STATUS_LABELS, PRIORITY_LABELS, type WorkOrder, type WorkOrderHistory, type WorkOrderPart } from '@/lib/supabase';
+import { STATUS_LABELS, PRIORITY_LABELS, WORK_TYPE_LABELS, type WorkOrder, type WorkOrderHistory, type WorkOrderPart } from '@/lib/supabase';
 
 type WoCompletionReportInput = {
   wo: WorkOrder;
@@ -71,6 +71,8 @@ export async function downloadWoCompletionReport(input: WoCompletionReportInput)
 
   const techText = technicians.length > 0 ? technicians.join(', ') : '-';
   const areaEquipment = [wo.area?.name, wo.equipment?.name].filter(Boolean).join(' / ') || '-';
+  const workTypeText =
+    (wo.work_types ?? []).length > 0 ? (wo.work_types ?? []).map((t) => WORK_TYPE_LABELS[t] ?? t).join(', ') : '-';
 
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(15);
@@ -98,6 +100,7 @@ export async function downloadWoCompletionReport(input: WoCompletionReportInput)
     body: [
       ['No. WO', wo.wo_number, 'Status', STATUS_LABELS[wo.status] ?? wo.status],
       ['Tanggal WO', new Date(wo.date_created).toLocaleDateString('id-ID'), 'Prioritas', PRIORITY_LABELS[wo.priority] ?? wo.priority],
+      ['Jenis Pekerjaan', workTypeText, '', ''],
       ['Peminta', wo.requester_name || '-', 'Dept. Peminta', wo.requester_department || '-'],
       ['Departemen', wo.department?.name ?? '-', 'Area / Equipment', areaEquipment],
       ['SPV', wo.spv?.full_name ?? '-', 'Teknisi', techText],

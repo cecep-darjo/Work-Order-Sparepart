@@ -1125,21 +1125,21 @@ export default function WorkOrderDetail({
         {history.length === 0 ? (
           <p className="text-sm text-slate-400">No history yet</p>
         ) : (
-          <div className="space-y-3">
+          <div className="space-y-2">
             {history.map((h) => (
               <div key={h.id} className="flex items-start gap-3 text-sm">
-                <div className="w-2 h-2 rounded-full bg-blue-500 mt-1.5 flex-shrink-0" />
+                <div className="w-1.5 h-1.5 rounded-full bg-blue-500 mt-2 flex-shrink-0" />
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-medium text-slate-900">{h.action}</span>
                     <Badge className={STATUS_COLORS[h.status as WOStatus] ?? 'bg-slate-100 text-slate-600 border-slate-200'}>
                       {STATUS_LABELS[h.status as WOStatus] ?? h.status}
                     </Badge>
+                    <span className="ml-auto shrink-0 text-xs text-slate-400">
+                      {h.performer?.full_name ?? 'Unknown'} • {fmtWoTime(h.performed_at)}
+                    </span>
                   </div>
-                  {h.notes && <p className="text-xs text-slate-500 mt-0.5">{h.notes}</p>}
-                  <p className="text-xs text-slate-400 mt-0.5">
-                    {h.performer?.full_name ?? 'Unknown'} • {fmtWoTime(h.performed_at)}
-                  </p>
+                  {h.notes && <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">{h.notes}</p>}
                 </div>
               </div>
             ))}

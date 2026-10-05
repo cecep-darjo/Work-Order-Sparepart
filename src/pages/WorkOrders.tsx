@@ -306,6 +306,11 @@ export default function WorkOrders({
                       ))}
                     </div>
                     <p className="text-sm text-slate-600 mt-1 line-clamp-2">{wo.problem_description}</p>
+                    {wo.status === 'pending' && wo.pending_reason && (
+                      <p className="text-xs text-orange-600 bg-orange-50 border border-orange-200 rounded-md px-2.5 py-1.5 mt-2">
+                        <span className="font-semibold">Alasan Pending:</span> {wo.pending_reason}
+                      </p>
+                    )}
                     {actions.length > 0 && (
                       <div className="flex flex-wrap gap-1.5 mt-2">
                         {actions.map((kind) => {
