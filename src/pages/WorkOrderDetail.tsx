@@ -9,6 +9,8 @@ import {
   STATUS_COLORS,
   PRIORITY_LABELS,
   PRIORITY_COLORS,
+  WORK_TYPES,
+  WORK_TYPE_LABELS,
   type WorkOrder,
   type Department,
   type Area,
@@ -93,6 +95,7 @@ export default function WorkOrderDetail({
     equipment_id: '',
     problem_description: '',
     priority: 'standard' as WorkOrder['priority'],
+    work_types: [] as string[],
     spv_id: '',
     // Khusus admin: tanggal WO, isi hasil pekerjaan, dan alasan perubahan
     date_created: '',
@@ -486,6 +489,7 @@ export default function WorkOrderDetail({
       equipment_id: wo.equipment_id ?? '',
       problem_description: wo.problem_description,
       priority: wo.priority,
+      work_types: wo.work_types ?? [],
       spv_id: wo.spv_id ?? '',
       date_created: (wo.date_created ?? '').slice(0, 10),
       analysis: wo.analysis ?? '',
@@ -540,6 +544,7 @@ export default function WorkOrderDetail({
       equipment_id: editForm.equipment_id || null,
       problem_description: editForm.problem_description.trim(),
       priority: editForm.priority,
+      work_types: editForm.work_types,
       spv_id: editForm.spv_id || null,
       updated_at: new Date().toISOString(),
     };
@@ -575,6 +580,9 @@ export default function WorkOrderDetail({
     if ((editForm.area_id || null) !== wo.area_id) changes.push('area');
     if ((editForm.equipment_id || null) !== wo.equipment_id) changes.push('equipment');
     if (editForm.priority !== wo.priority) changes.push(`priority ${wo.priority} -> ${editForm.priority}`);
+    const wtA = [...(editForm.work_types ?? [])].sort().join(',');
+    const wtB = [...(wo.work_types ?? [])].sort().join(',');
+    if (wtA !== wtB) changes.push('jenis pekerjaan');
     if (editForm.problem_description.trim() !== wo.problem_description) changes.push('problem description');
     if ((editForm.spv_id || null) !== wo.spv_id) changes.push('SPV');
     if (isRealAdmin) {
@@ -665,6 +673,11 @@ export default function WorkOrderDetail({
             <h2 className="text-xl font-bold text-slate-900">{wo.wo_number}</h2>
             <Badge className={STATUS_COLORS[wo.status]}>{STATUS_LABELS[wo.status]}</Badge>
             <Badge className={PRIORITY_COLORS[wo.priority]}>{PRIORITY_LABELS[wo.priority]}</Badge>
+            {(wo.work_types ?? []).map((t) => (
+              <Badge key={t} className="bg-indigo-100 text-indigo-700 border-indigo-200">
+                {WORK_TYPE_LABELS[t] ?? t}
+              </Badge>
+            ))}
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
             Created {new Date(wo.created_at).toLocaleString()}
@@ -1154,6 +1167,29 @@ export default function WorkOrderDetail({
                   <option key={k} value={k}>{PRIORITY_LABELS[k]}</option>
                 ))}
               </Select>
+            </div>
+            <div>
+              <Label>Jenis Pekerjaan</Label>
+              <div className="flex flex-wrap gap-3 mt-1 pt-2">
+                {WORK_TYPES.map((t) => (
+                  <label key={t} className="inline-flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={editForm.work_types.includes(t)}
+                      onChange={(e) =>
+                        setEditForm((f) => ({
+                          ...f,
+                          work_types: e.target.checked
+                            ? [...f.work_types, t]
+                            : f.work_types.filter((x) => x !== t),
+                        }))
+                      }
+                      className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                    />
+                    {WORK_TYPE_LABELS[t] ?? t}
+                  </label>
+                ))}
+              </div>
             </div>
             <div>
               <Label>Area</Label>

@@ -145,6 +145,7 @@ export type WorkOrder = {
   equipment_id: string | null;
   problem_description: string;
   priority: 'standard' | 'urgent';
+  work_types: string[];
   status: WOStatus;
   spv_id: string | null;
   technician_id: string | null;
@@ -248,6 +249,17 @@ export const PRIORITY_LABELS: Record<string, string> = {
 export const PRIORITY_COLORS: Record<string, string> = {
   standard: 'bg-blue-100 text-blue-700 border-blue-200',
   urgent: 'bg-red-100 text-red-700 border-red-200',
+};
+
+// Jenis pekerjaan (checkpoint) pada Work Order — dapat diisi lebih dari satu.
+export const WORK_TYPES = ['pembuatan', 'perbaikan', 'modifikasi', 'pengadaan'] as const;
+export type WorkType = (typeof WORK_TYPES)[number];
+
+export const WORK_TYPE_LABELS: Record<string, string> = {
+  pembuatan: 'Pembuatan',
+  perbaikan: 'Perbaikan',
+  modifikasi: 'Modifikasi',
+  pengadaan: 'Pengadaan',
 };
 
 export const ROLE_LABELS: Record<Role, string> = {

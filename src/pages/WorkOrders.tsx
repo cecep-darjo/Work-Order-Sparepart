@@ -8,6 +8,8 @@ import {
   STATUS_COLORS,
   PRIORITY_LABELS,
   PRIORITY_COLORS,
+  WORK_TYPES,
+  WORK_TYPE_LABELS,
   type WorkOrder,
   type WOStatus,
   type Profile,
@@ -55,6 +57,7 @@ export default function WorkOrders({
     equipment_id: '',
     problem_description: '',
     priority: 'standard' as 'standard' | 'urgent',
+    work_types: [] as string[],
     spv_id: '',
     requester_id: '',
     requester_name: '',
@@ -158,6 +161,7 @@ export default function WorkOrders({
       department_id: createForm.department_id,
       problem_description: createForm.problem_description,
       priority: createForm.priority,
+      work_types: createForm.work_types,
       status: createForm.spv_id ? 'assigned' : 'new',
     };
     if (createForm.area_id) insertData.area_id = createForm.area_id;
@@ -197,6 +201,7 @@ export default function WorkOrders({
       equipment_id: '',
       problem_description: '',
       priority: 'standard',
+      work_types: [],
       spv_id: '',
       requester_id: '',
       requester_name: '',
@@ -294,6 +299,11 @@ export default function WorkOrders({
                       <Badge className={PRIORITY_COLORS[wo.priority]}>
                         {PRIORITY_LABELS[wo.priority]}
                       </Badge>
+                      {(wo.work_types ?? []).map((t) => (
+                        <Badge key={t} className="bg-indigo-100 text-indigo-700 border-indigo-200">
+                          {WORK_TYPE_LABELS[t] ?? t}
+                        </Badge>
+                      ))}
                     </div>
                     <p className="text-sm text-slate-600 mt-1 line-clamp-2">{wo.problem_description}</p>
                     {actions.length > 0 && (
@@ -437,6 +447,31 @@ export default function WorkOrders({
               onChange={(e) => setCreateForm((f) => ({ ...f, problem_description: e.target.value }))}
               placeholder="Describe the problem..."
             />
+          </div>
+
+          <div>
+            <Label>Jenis Pekerjaan</Label>
+            <div className="flex flex-wrap gap-3 mt-2">
+              {WORK_TYPES.map((t) => (
+                <label key={t} className="inline-flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={createForm.work_types.includes(t)}
+                    onChange={(e) =>
+                      setCreateForm((f) => ({
+                        ...f,
+                        work_types: e.target.checked
+                          ? [...f.work_types, t]
+                          : f.work_types.filter((x) => x !== t),
+                      }))
+                    }
+                    className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                  />
+                  {WORK_TYPE_LABELS[t] ?? t}
+                </label>
+              ))}
+            </div>
+            <p className="text-xs text-slate-400 mt-1">Boleh pilih lebih dari satu.</p>
           </div>
 
           <div>
