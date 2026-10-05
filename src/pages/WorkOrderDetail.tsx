@@ -1374,9 +1374,6 @@ export default function WorkOrderDetail({
           </p>
         </div>
       </Modal>
-          </p>
-        </div>
-      </Modal>
 
       {/* Intervention modal */}
       <Modal open={showIntervention} onClose={() => setShowIntervention(false)} title="Admin Intervention">
