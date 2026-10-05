@@ -1,5 +1,6 @@
 import { supabase, PRIORITY_LABELS } from '@/lib/supabase';
 import { renderSlipPdf, fmtDateTime, fmtQty } from '@/lib/slipPdf';
+import { fetchSlipSignatures } from '@/lib/signatures';
 
 export type PartRequestStatus = 'pending' | 'ss_approved' | 'approved' | 'rejected' | 'cancelled';
 
@@ -77,9 +78,33 @@ export function insufficientItems(req: PartRequest): PartRequestItem[] {
 }
 
 /**
+ * Petugas inventory yang memproses pengeluaran. Alur approval 2 tahap mengisi `decided_by` dengan
+ * SS yang menyetujui, sehingga pemroses diambil dari transaksi stok keluar yang dibuat saat proses.
+ * Mengembalikan null bila tidak ditemukan (mis. belum diproses).
+ */
+async function fetchProcessor(req: PartRequest): Promise<{ id: string; name: string | null } | null> {
+  const { data: tx } = await supabase
+    .from('inventory_transactions')
+    .select('created_by')
+    .eq('reference', req.request_no)
+    .eq('type', 'stock_out')
+    .order('created_at', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  const id = (tx as { created_by: string } | null)?.created_by;
+  if (!id) return null;
+  const { data: p } = await supabase.from('profiles').select('full_name').eq('id', id).maybeSingle();
+  return { id, name: (p as { full_name: string } | null)?.full_name ?? null };
+}
+
+/**
  * Membuat & mengunduh "Lembar Pengeluaran Barang" (PDF) dari permintaan yang sudah disetujui.
+ * Tanda tangan digital dibubuhkan sesuai user: Penerima = peminta, Bagian Spare Part = pemroses inventory.
  */
 export async function downloadIssueSlip(req: PartRequest): Promise<void> {
+  const processor = await fetchProcessor(req);
+  const sigs = await fetchSlipSignatures([req.requested_by, processor?.id]);
+
   const wo = req.work_order;
   const techNames = (wo?.technicians ?? [])
     .map((t) => t.technician?.full_name)
@@ -108,8 +133,16 @@ export async function downloadIssueSlip(req: PartRequest): Promise<void> {
       [it.note, it.work_order_part_id === null ? '(dikembalikan ke stok)' : ''].filter(Boolean).join(' ') || '-',
     ]),
     signatures: [
-      { title: 'Penerima', name: req.requester?.full_name },
-      { title: 'Bagian Spare Part', name: req.decider?.full_name },
+      {
+        title: 'Penerima',
+        name: req.requester?.full_name,
+        image: req.requested_by ? sigs[req.requested_by] : null,
+      },
+      {
+        title: 'Bagian Spare Part',
+        name: processor?.name ?? req.decider?.full_name,
+        image: processor ? sigs[processor.id] : null,
+      },
     ],
   });
 }

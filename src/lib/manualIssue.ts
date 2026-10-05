@@ -1,5 +1,6 @@
 import { supabase } from '@/lib/supabase';
 import { renderSlipPdf, fmtDateTime, fmtQty } from '@/lib/slipPdf';
+import { fetchSlipSignatures } from '@/lib/signatures';
 
 type TxRow = {
   id: string;
@@ -25,6 +26,9 @@ async function buildAndDownload(slipNo: string, rows: TxRow[]): Promise<void> {
   // created_by mengacu ke auth.users, jadi nama petugas diambil dari profiles secara terpisah.
   const { data: issuer } = await supabase.from('profiles').select('full_name').eq('id', first.created_by).maybeSingle();
 
+  // Penerima diketik bebas (belum tentu user terdaftar) -> tanda tangan basah; petugas = user pembuat transaksi.
+  const sigs = await fetchSlipSignatures([first.created_by]);
+
   await renderSlipPdf({
     docNo: slipNo,
     subtitle: 'Spare Part - pengeluaran manual',
@@ -44,7 +48,7 @@ async function buildAndDownload(slipNo: string, rows: TxRow[]): Promise<void> {
     ]),
     signatures: [
       { title: 'Penerima', name: first.recipient },
-      { title: 'Bagian Spare Part', name: issuer?.full_name },
+      { title: 'Bagian Spare Part', name: issuer?.full_name, image: sigs[first.created_by] },
     ],
   });
 }

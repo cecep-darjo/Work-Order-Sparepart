@@ -3,6 +3,7 @@ import { useAuth } from '@/context/AuthContext';
 import { ROLE_LABELS, type Role } from '@/lib/supabase';
 import { useActionItemsContext } from '@/context/ActionItemsContext';
 import NotificationBell from '@/components/NotificationBell';
+import SignatureModal from '@/components/SignatureModal';
 import {
   LayoutDashboard,
   ClipboardList,
@@ -16,6 +17,7 @@ import {
   Boxes,
   FileText,
   ClipboardCheck,
+  PenLine,
 } from 'lucide-react';
 
 export type PageKey =
@@ -61,6 +63,7 @@ export default function Layout({
 }) {
   const { profile, signOut } = useAuth();
   const { groups, total } = useActionItemsContext();
+  const [sigOpen, setSigOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   if (!profile) return null;
@@ -122,6 +125,16 @@ export default function Layout({
             <p className="text-xs text-slate-500">{ROLE_LABELS[profile.role]}</p>
           </div>
           <button
+            onClick={() => {
+              setSigOpen(true);
+              setSidebarOpen(false);
+            }}
+            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+          >
+            <PenLine className="w-4 h-4" />
+            Tanda Tangan
+          </button>
+          <button
             onClick={() => signOut()}
             className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
           >
@@ -130,6 +143,8 @@ export default function Layout({
           </button>
         </div>
       </aside>
+
+      <SignatureModal open={sigOpen} onClose={() => setSigOpen(false)} />
 
       {/* Main content */}
       <div className="flex-1 flex flex-col min-w-0">

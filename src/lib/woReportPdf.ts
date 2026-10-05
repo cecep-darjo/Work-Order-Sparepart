@@ -1,3 +1,4 @@
+import { woWorkTimes } from '@/lib/woHistory';
 import { STATUS_LABELS, PRIORITY_LABELS, type WorkOrder, type WorkOrderHistory, type WorkOrderPart } from '@/lib/supabase';
 
 type WoCompletionReportInput = {
@@ -59,6 +60,7 @@ export async function downloadWoCompletionReport(input: WoCompletionReportInput)
   const [{ jsPDF }, { default: autoTable }] = await Promise.all([import('jspdf'), import('jspdf-autotable')]);
 
   const { wo, parts, history, technicians, generatedBy, verifiedBy, verifiedAt } = input;
+  const workTimes = woWorkTimes(history, wo.status);
 
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
   const pageW = doc.internal.pageSize.getWidth();
@@ -96,8 +98,10 @@ export async function downloadWoCompletionReport(input: WoCompletionReportInput)
     body: [
       ['No. WO', wo.wo_number, 'Status', STATUS_LABELS[wo.status] ?? wo.status],
       ['Tanggal WO', new Date(wo.date_created).toLocaleDateString('id-ID'), 'Prioritas', PRIORITY_LABELS[wo.priority] ?? wo.priority],
+      ['Peminta', wo.requester_name || '-', 'Dept. Peminta', wo.requester_department || '-'],
       ['Departemen', wo.department?.name ?? '-', 'Area / Equipment', areaEquipment],
       ['SPV', wo.spv?.full_name ?? '-', 'Teknisi', techText],
+      ['Mulai Dikerjakan', fmtDateTime(workTimes.startedAt), 'Selesai', fmtDateTime(workTimes.finishedAt)],
       ['Disetujui SPV', verifiedBy ?? wo.spv?.full_name ?? '-', 'Waktu Approval', fmtDateTime(verifiedAt)],
       ['Deskripsi Masalah', wo.problem_description],
       ['Analisa', wo.analysis ?? '-'],

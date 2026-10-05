@@ -1,3 +1,4 @@
+import { uuid } from '@/lib/uuid';
 import { useEffect, useState, useCallback, useMemo } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import {
@@ -186,7 +187,7 @@ export default function Transactions() {
     for (const file of files) {
       const ext = file.name.includes('.') ? file.name.split('.').pop() : '';
       const safeBase = file.name.replace(/\.[^/.]+$/, '').replace(/[^a-zA-Z0-9_-]+/g, '-').slice(0, 60) || 'file';
-      const objectPath = `gr/${new Date().getFullYear()}/${Date.now()}-${crypto.randomUUID()}-${safeBase}${ext ? `.${ext}` : ''}`;
+      const objectPath = `gr/${new Date().getFullYear()}/${Date.now()}-${uuid()}-${safeBase}${ext ? `.${ext}` : ''}`;
       const { error: uploadError } = await supabase.storage
         .from('inventory-gr-files')
         .upload(objectPath, file, { upsert: false, contentType: file.type });
@@ -231,7 +232,7 @@ export default function Transactions() {
       if (!it.spare_part_id) { unlinked += 1; continue; }
       if (receiptLines.some((l) => l.pr_item_id === it.id)) continue;
       added.push({
-        key: crypto.randomUUID(),
+        key: uuid(),
         spare_part_id: it.spare_part_id,
         quantity: rem,
         pr_item_id: it.id,
@@ -253,7 +254,7 @@ export default function Transactions() {
     setReceiptLines((prev) => {
       const existing = prev.find((l) => l.spare_part_id === receiptPart && !l.pr_item_id);
       if (existing) return prev.map((l) => (l === existing ? { ...l, quantity: l.quantity + receiptQty } : l));
-      return [...prev, { key: crypto.randomUUID(), spare_part_id: receiptPart, quantity: receiptQty, pr_item_id: null, pr_no: null, supplier_name: null, max: null }];
+      return [...prev, { key: uuid(), spare_part_id: receiptPart, quantity: receiptQty, pr_item_id: null, pr_no: null, supplier_name: null, max: null }];
     });
     setReceiptPart('');
     setReceiptQty(1);
@@ -381,7 +382,7 @@ export default function Transactions() {
       const stock = Number(it.spare_part?.current_stock ?? 0);
       if (stock <= 0) { noStock += 1; continue; }
       added.push({
-        key: crypto.randomUUID(),
+        key: uuid(),
         spare_part_id: it.spare_part_id,
         quantity: Math.min(rem, stock),
         bon_item_id: it.id,
@@ -413,7 +414,7 @@ export default function Transactions() {
       if (existing) return prev.map((l) => (l === existing ? { ...l, quantity: l.quantity + issueQty } : l));
       return [
         ...prev,
-        { key: crypto.randomUUID(), spare_part_id: issuePart, quantity: issueQty, bon_item_id: null, bon_no: null, bon_notes: null, max: null },
+        { key: uuid(), spare_part_id: issuePart, quantity: issueQty, bon_item_id: null, bon_no: null, bon_notes: null, max: null },
       ];
     });
     setIssuePart('');

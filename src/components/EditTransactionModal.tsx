@@ -1,3 +1,4 @@
+import { uuid } from '@/lib/uuid';
 import { useEffect, useMemo, useState } from 'react';
 import { supabase, TX_TYPE_LABELS, GR_KIND_LABELS } from '@/lib/supabase';
 import { Button, Input, Label, Modal, Spinner, Textarea } from '@/components/ui';
@@ -35,7 +36,7 @@ async function uploadGrFiles(files: File[]): Promise<string[]> {
   for (const file of files) {
     const ext = file.name.includes('.') ? file.name.split('.').pop() : '';
     const safeBase = file.name.replace(/\.[^/.]+$/, '').replace(/[^a-zA-Z0-9_-]+/g, '-').slice(0, 60) || 'file';
-    const objectPath = `gr/${new Date().getFullYear()}/${Date.now()}-${crypto.randomUUID()}-${safeBase}${ext ? `.${ext}` : ''}`;
+    const objectPath = `gr/${new Date().getFullYear()}/${Date.now()}-${uuid()}-${safeBase}${ext ? `.${ext}` : ''}`;
     const { error } = await supabase.storage.from('inventory-gr-files').upload(objectPath, file, { upsert: false, contentType: file.type });
     if (error) throw error;
     urls.push(supabase.storage.from('inventory-gr-files').getPublicUrl(objectPath).data.publicUrl);

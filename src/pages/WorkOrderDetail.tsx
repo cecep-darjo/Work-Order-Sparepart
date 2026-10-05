@@ -1,4 +1,5 @@
-import { useEffect, useState, useCallback } from 'react';
+import { uuid } from '@/lib/uuid';
+import { useEffect, useState, useCallback, useMemo } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import {
   supabase,
@@ -24,6 +25,7 @@ import { MultiPicker, SearchablePicker } from '@/components/Pickers';
 import { PartRequestCard } from '@/components/PartRequests';
 import { PR_SELECT, type PartRequest } from '@/lib/partRequests';
 import { downloadWoCompletionReport } from '@/lib/woReportPdf';
+import { fetchWoHistory, fmtWoTime, woWorkTimes } from '@/lib/woHistory';
 import { ArrowLeft, UserCog, Play, Pause, CheckCircle2, RotateCcw, Lock, Unlock, Package, Plus, Trash2, Pencil, History as HistoryIcon, FileDown, ImagePlus, X } from 'lucide-react';
 
 const WO_PHOTO_MAX_BYTES = 500 * 1024;
@@ -57,6 +59,7 @@ export default function WorkOrderDetail({
   const [loading, setLoading] = useState(true);
   const [wo, setWo] = useState<WorkOrder | null>(null);
   const [history, setHistory] = useState<WorkOrderHistory[]>([]);
+  const workTimes = useMemo(() => woWorkTimes(history, wo?.status ?? ''), [history, wo?.status]);
   const [parts, setParts] = useState<WorkOrderPart[]>([]);
   const [techList, setTechList] = useState<Profile[]>([]);
   const [spvList, setSpvList] = useState<Profile[]>([]);
@@ -119,12 +122,7 @@ export default function WorkOrderDetail({
     setResult(woData?.result ?? '');
     setPendingReason(woData?.pending_reason ?? '');
 
-    const { data: histData } = await supabase
-      .from('work_order_history')
-      .select('*, performer:profiles!performed_by(*)')
-      .eq('work_order_id', woId)
-      .order('performed_at', { ascending: false });
-    setHistory((histData as unknown as WorkOrderHistory[]) ?? []);
+    setHistory(await fetchWoHistory(woId));
 
     const { data: partsData } = await supabase
       .from('work_order_parts')
@@ -212,13 +210,9 @@ export default function WorkOrderDetail({
     if (!profile) return;
     setActing(true);
     try {
-      const [{ data: woData }, { data: histData }, { data: partsData }] = await Promise.all([
+      const [{ data: woData }, hist, { data: partsData }] = await Promise.all([
         supabase.from('work_orders').select(WO_SELECT).eq('id', woId).maybeSingle(),
-        supabase
-          .from('work_order_history')
-          .select('*, performer:profiles!performed_by(*)')
-          .eq('work_order_id', woId)
-          .order('performed_at', { ascending: false }),
+        fetchWoHistory(woId),
         supabase
           .from('work_order_parts')
           .select('*, spare_part:spare_parts(*)')
@@ -232,7 +226,6 @@ export default function WorkOrderDetail({
         return;
       }
 
-      const hist = (histData as unknown as WorkOrderHistory[]) ?? [];
       const usedParts = (partsData as unknown as WorkOrderPart[]) ?? [];
       const verifiedEvent = [...hist]
         .filter((h) => h.status === 'verified' || (h.action ?? '').toLowerCase().includes('verified'))
@@ -277,7 +270,7 @@ export default function WorkOrderDetail({
       for (const file of woPhotoFiles) {
         const ext = file.name.includes('.') ? file.name.split('.').pop() : '';
         const safeBase = file.name.replace(/\.[^/.]+$/, '').replace(/[^a-zA-Z0-9_-]+/g, '-').slice(0, 60) || 'photo';
-        const objectPath = `wo/${new Date().getFullYear()}/${wo.id}/${Date.now()}-${crypto.randomUUID()}-${safeBase}${ext ? `.${ext}` : ''}`;
+        const objectPath = `wo/${new Date().getFullYear()}/${wo.id}/${Date.now()}-${uuid()}-${safeBase}${ext ? `.${ext}` : ''}`;
         const { error: uploadError } = await supabase.storage
           .from('wo-photo-files')
           .upload(objectPath, file, { upsert: false, contentType: file.type });
@@ -683,8 +676,12 @@ export default function WorkOrderDetail({
       <Card className="p-5 space-y-3">
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <InfoRow label="Department" value={wo.department?.name ?? '-'} />
+          <InfoRow label="Peminta" value={wo.requester_name || '-'} />
+          <InfoRow label="Dept. Peminta" value={wo.requester_department || '-'} />
           <InfoRow label="Area" value={wo.area?.name ?? '-'} />
           <InfoRow label="Equipment" value={wo.equipment?.name ?? '-'} />
+          <InfoRow label="Mulai Dikerjakan" value={fmtWoTime(workTimes.startedAt)} />
+          <InfoRow label="Selesai" value={fmtWoTime(workTimes.finishedAt)} />
           <InfoRow label="Date Created" value={new Date(wo.date_created).toLocaleDateString()} />
           <InfoRow label="SPV" value={wo.spv?.full_name ?? '-'} />
           <InfoRow label="Technician" value={assignedTechs.length ? assignedTechs.map((t) => t.full_name).join(', ') : '-'} />
@@ -1128,7 +1125,7 @@ export default function WorkOrderDetail({
                   </div>
                   {h.notes && <p className="text-xs text-slate-500 mt-0.5">{h.notes}</p>}
                   <p className="text-xs text-slate-400 mt-0.5">
-                    {h.performer?.full_name ?? 'Unknown'} • {new Date(h.performed_at).toLocaleString()}
+                    {h.performer?.full_name ?? 'Unknown'} • {fmtWoTime(h.performed_at)}
                   </p>
                 </div>
               </div>

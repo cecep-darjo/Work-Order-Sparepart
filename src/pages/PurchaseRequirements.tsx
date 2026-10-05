@@ -1,3 +1,4 @@
+import { uuid } from '@/lib/uuid';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { supabase, type Profile } from '@/lib/supabase';
@@ -105,7 +106,7 @@ async function uploadAttachmentFiles(prId: string, files: File[]): Promise<strin
   for (const file of files) {
     const ext = file.name.includes('.') ? file.name.split('.').pop() : '';
     const safeBase = file.name.replace(/\.[^/.]+$/, '').replace(/[^a-zA-Z0-9_-]+/g, '-').slice(0, 60) || 'file';
-    const objectPath = `pr/${new Date().getFullYear()}/${prId}/${Date.now()}-${crypto.randomUUID()}-${safeBase}${ext ? `.${ext}` : ''}`;
+    const objectPath = `pr/${new Date().getFullYear()}/${prId}/${Date.now()}-${uuid()}-${safeBase}${ext ? `.${ext}` : ''}`;
     const { error: uploadError } = await supabase.storage
       .from('purchase-requirement-files')
       .upload(objectPath, file, { upsert: false, contentType: file.type });

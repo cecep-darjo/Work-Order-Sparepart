@@ -72,5 +72,17 @@ Buka `http://<IP-PC-proxy>:8080/__proxy/health` di PC lain:
 | `appBuilt: false` | jalankan `node proxy/build-offline.mjs` |
 | `upstreamReachable: false` | PC proxy tidak bisa menjangkau Supabase (cek internet PC proxy) |
 | login gagal padahal health OK | pastikan `.env` berisi anon key yang benar, lalu build ulang |
+| upload foto / tambah baris / simpan gagal HANYA di PC lain (normal di PC server) | aplikasi memanggil fitur browser yang hanya ada di HTTPS/localhost (lihat catatan pengembang); pastikan memakai versi terbaru lalu build ulang dan tekan Ctrl+F5 |
 
 Tambahkan ke `.gitignore` project: `dist-offline` dan `proxy/.env.proxy`.
+
+## Catatan untuk pengembang: HTTP bukan "secure context"
+
+Di PC lain aplikasi dibuka lewat `http://192.168.x.x:8080`. Browser **menonaktifkan** sejumlah API
+di alamat seperti itu (di `localhost` dan HTTPS semuanya normal, sehingga bug baru terlihat di PC lain):
+
+- `crypto.randomUUID()` -> pakai helper `uuid()` di `src/lib/uuid.ts`
+- `navigator.clipboard`, `crypto.subtle`, `navigator.locks`, Service Worker, `Notification`
+
+Aturannya: jangan memanggil API di atas langsung. Selalu uji fitur baru dengan membukanya dari
+PC lain lewat proxy, bukan hanya dari `localhost`.

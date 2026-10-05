@@ -148,6 +148,9 @@ export type WorkOrder = {
   status: WOStatus;
   spv_id: string | null;
   technician_id: string | null;
+  requester_id: string | null;
+  requester_name: string | null;
+  requester_department: string | null;
   analysis: string | null;
   action_taken: string | null;
   result: string | null;

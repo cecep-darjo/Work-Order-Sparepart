@@ -7,7 +7,8 @@
 /** Baris info: [label, nilai] selebar penuh, atau [label, nilai, label, nilai] dua kolom. */
 export type SlipInfoRow = [string, string] | [string, string, string, string];
 
-export type SlipSignature = { title: string; name?: string | null };
+/** `image`: PNG data URL tanda tangan digital (opsional); bila kosong kotak dibiarkan untuk tanda tangan basah. */
+export type SlipSignature = { title: string; name?: string | null; image?: string | null };
 
 export type SlipOptions = {
   docNo: string;
@@ -31,7 +32,7 @@ export function fmtQty(n: number): string {
 export async function renderSlipPdf(opts: SlipOptions): Promise<void> {
   const [{ jsPDF }, { default: autoTable }] = await Promise.all([import('jspdf'), import('jspdf-autotable')]);
 
-  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4', compress: true });
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
   const M = 15;
@@ -115,6 +116,20 @@ export async function renderSlipPdf(opts: SlipOptions): Promise<void> {
     doc.text('Tanggal : ........ / ........ / ............', x + 5, y + 14);
     doc.text('Tanda tangan', x + boxW / 2, y + 20, { align: 'center' });
     doc.setTextColor(0);
+    if (sig.image) {
+      // Muat gambar dalam area di atas garis nama (tinggi ~15 mm, lebar maks ~56 mm), rasio dijaga.
+      try {
+        const props = doc.getImageProperties(sig.image);
+        const maxW = Math.min(56, boxW - 20);
+        const maxH = 15;
+        const k = Math.min(maxW / props.width, maxH / props.height);
+        const w = props.width * k;
+        const h = props.height * k;
+        doc.addImage(sig.image, 'PNG', x + (boxW - w) / 2, y + 37.5 - h, w, h, undefined, 'FAST');
+      } catch {
+        /* gambar rusak: kotak dibiarkan kosong */
+      }
+    }
     doc.setDrawColor(90);
     doc.line(x + 10, y + 38, x + boxW - 10, y + 38);
     doc.setFontSize(9);

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { LucideIcon } from 'lucide-react';
 import { ClipboardCheck, Lock, ShieldCheck, UserPlus, Wrench } from 'lucide-react';
-import { supabase, spvOrFilter, stockStatus, type Profile, type SparePart, type WorkOrder } from '@/lib/supabase';
+import { supabase, stockStatus, type Profile, type SparePart, type WorkOrder } from '@/lib/supabase';
 import type { PageKey } from '@/components/Layout';
 
 /**
@@ -191,8 +191,8 @@ async function fetchWorkOrders(profile: Profile, statuses: string[]): Promise<Wo
     .in('status', statuses)
     .order('created_at', { ascending: true })
     .limit(LIMIT);
-  // SPV: hanya WO departemennya / yang menunjuk dirinya sebagai PIC. Teknisi dibatasi RLS.
-  if (profile.role === 'spv') q = q.or(spvOrFilter(profile));
+  // SPV: tanpa filter tambahan — RLS (migration 033) memungkinkan SPV membaca semua WO.
+  // Aksi per-WO tetap lewat woActionsFor() yang membatasi hanya pada WO yang relevan untuk user.
   const { data } = await q;
   return (data as WoRow[]) ?? [];
 }
