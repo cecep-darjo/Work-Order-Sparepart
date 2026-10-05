@@ -16,19 +16,21 @@ Catatan:
   - Aman dijalankan ulang.
 */
 
--- 1) Sesuaikan data lama terlebih dahulu (sebelum menerapkan constraint baru).
+-- 1) Lepaskan constraint lama DULU, supaya step-2 (migrasi data ke 'standard')
+--    tidak menabrak check constraint lama yang hanya menerima low/medium/high/urgent.
+ALTER TABLE public.work_orders
+  DROP CONSTRAINT IF EXISTS work_orders_priority_check;
+
+-- 2) Sesuaikan data lama.
 UPDATE public.work_orders
 SET priority = 'standard'
 WHERE priority IN ('low', 'medium', 'high');
 
--- 2) Ubah default.
+-- 3) Ubah default.
 ALTER TABLE public.work_orders
   ALTER COLUMN priority SET DEFAULT 'standard';
 
--- 3) Ganti constraint ke dua nilai saja.
-ALTER TABLE public.work_orders
-  DROP CONSTRAINT IF EXISTS work_orders_priority_check;
-
+-- 4) Terapkan constraint dua nilai saja.
 ALTER TABLE public.work_orders
   ADD CONSTRAINT work_orders_priority_check
   CHECK (priority IN ('standard', 'urgent'));
