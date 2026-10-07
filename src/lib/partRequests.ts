@@ -40,6 +40,7 @@ export type PartRequest = {
     status: string;
     problem_description: string;
     priority: string;
+    spv_id: string | null;
     department?: { name: string } | null;
     area?: { name: string } | null;
     equipment?: { name: string } | null;
@@ -49,7 +50,7 @@ export type PartRequest = {
 };
 
 export const PR_SELECT =
-  '*, work_order:work_orders(id, wo_number, status, problem_description, priority, department:departments(name), area:areas(name), equipment:equipment(name), technicians:work_order_technicians(technician:profiles!technician_id(full_name))), requester:profiles!requested_by(full_name), decider:profiles!decided_by(full_name), items:wo_part_request_items(*, spare_part:spare_parts(code, name, unit, current_stock, location))';
+  '*, work_order:work_orders(id, wo_number, status, problem_description, priority, spv_id, department:departments(name), area:areas(name), equipment:equipment(name), technicians:work_order_technicians(technician:profiles!technician_id(full_name))), requester:profiles!requested_by(full_name), decider:profiles!decided_by(full_name), items:wo_part_request_items(*, spare_part:spare_parts(code, name, unit, current_stock, location))';
 
 export const PR_STATUS_LABELS: Record<PartRequestStatus, string> = {
   pending: 'Waiting Part Approval',

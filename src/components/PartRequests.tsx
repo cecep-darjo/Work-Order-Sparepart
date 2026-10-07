@@ -48,9 +48,10 @@ export function PartRequestCard({
   const wo = request.work_order;
   const isPending = request.status === 'pending';
   const isSsApproved = request.status === 'ss_approved';
-  const canSsApprove = isPending && (viewer.role === 'admin' || viewer.role === 'ss');
+  const isPicSpv = viewer.role === 'spv' && wo?.spv_id === viewer.id;
+  const canSsApprove = isPending && (viewer.role === 'admin' || viewer.role === 'ss' || isPicSpv);
   const canInventoryProcess = isSsApproved && (viewer.role === 'admin' || viewer.role === 'inventory');
-  const canReject = (isPending || isSsApproved) && (viewer.role === 'admin' || viewer.role === 'ss');
+  const canReject = (isPending || isSsApproved) && (viewer.role === 'admin' || viewer.role === 'ss' || isPicSpv);
   const canCancel = isPending && (request.requested_by === viewer.id || viewer.role === 'admin');
   const shortItems = insufficientItems(request);
 
@@ -58,7 +59,7 @@ export function PartRequestCard({
     setActing(true);
     const { error } = await supabase.rpc('approve_part_request', { p_request_id: request.id });
     if (error) {
-      alert('Gagal approve SS: ' + error.message);
+      alert('Gagal approve: ' + error.message);
       setActing(false);
       onChanged();
       return;
@@ -130,7 +131,7 @@ export function PartRequestCard({
         <div className="flex gap-2 flex-shrink-0 flex-wrap justify-end">
           {canSsApprove && (
             <Button size="sm" variant="success" onClick={approveBySs} disabled={acting}>
-              <Check className="w-4 h-4" /> {acting ? 'Memproses...' : 'Approve SS'}
+              <Check className="w-4 h-4" /> {acting ? 'Memproses...' : 'Approve'}
             </Button>
           )}
           {canInventoryProcess && (
@@ -204,18 +205,18 @@ export function PartRequestCard({
         <p className="text-xs text-red-600 flex items-center gap-1">
           <AlertTriangle className="w-3.5 h-3.5" />
           Stok tidak mencukupi untuk: {shortItems.map((i) => i.spare_part?.name).join(', ')}.
-          {(canSsApprove && !canInventoryProcess) ? ' Approve SS tersedia setelah stok cukup.' : ' Proses pengeluaran tersedia setelah stok cukup.'}
+          {(canSsApprove && !canInventoryProcess) ? ' Approve tersedia setelah stok cukup.' : ' Proses pengeluaran tersedia setelah stok cukup.'}
         </p>
       )}
 
       {request.status === 'ss_approved' && (
         <p className="text-xs text-blue-700">
-          Disetujui SS/admin oleh {request.decider?.full_name ?? '-'} - {fmt(request.decided_at)}
+          Disetujui SPV/SS/Admin oleh {request.decider?.full_name ?? '-'} - {fmt(request.decided_at)}
         </p>
       )}
       {request.status === 'approved' && (
         <p className="text-xs text-slate-400">
-          Diproses inventory (approval SS: {request.decider?.full_name ?? '-'}) - {fmt(request.decided_at)}
+          Diproses inventory (approval: {request.decider?.full_name ?? '-'}) - {fmt(request.decided_at)}
         </p>
       )}
       {request.status === 'rejected' && (
@@ -269,7 +270,14 @@ export function PartRequestsInbox() {
         ? supabase.from('wo_part_requests').select(PR_SELECT).eq('status', 'ss_approved').order('requested_at', { ascending: true })
         : profile?.role === 'ss'
           ? supabase.from('wo_part_requests').select(PR_SELECT).eq('status', 'pending').order('requested_at', { ascending: true })
-          : supabase.from('wo_part_requests').select(PR_SELECT).in('status', ['pending', 'ss_approved']).order('requested_at', { ascending: true });
+          : profile?.role === 'spv'
+            ? supabase
+                .from('wo_part_requests')
+                .select(PR_SELECT)
+                .eq('status', 'pending')
+                .eq('work_order.spv_id', profile.id)
+                .order('requested_at', { ascending: true })
+            : supabase.from('wo_part_requests').select(PR_SELECT).in('status', ['pending', 'ss_approved']).order('requested_at', { ascending: true });
 
     const [{ data: q }, { data: r }] = await Promise.all([
       queueQuery,

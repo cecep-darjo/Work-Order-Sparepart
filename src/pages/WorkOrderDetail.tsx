@@ -987,7 +987,7 @@ export default function WorkOrderDetail({
           <Package className="w-4 h-4" /> Permintaan Spare Part
         </h3>
         <p className="text-xs text-slate-400 mb-4">
-          Alur: teknisi mengajukan → disetujui SS/admin → diproses pengeluaran oleh inventory/admin. Stok berkurang saat tahap proses inventory.
+          Alur: teknisi mengajukan → disetujui SPV/SS/admin → diproses pengeluaran oleh inventory/admin. Stok berkurang saat tahap proses inventory.
         </p>
 
         {(isAdmin || isTech) && wo.status !== 'closed' && wo.status !== 'verified' && wo.status !== 'canceled' && (

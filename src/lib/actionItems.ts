@@ -109,7 +109,7 @@ export const WO_ACTION_META: Record<
   process_part: {
     chip: 'Proses permintaan part',
     title: 'Permintaan part siap diproses',
-    description: 'Sudah disetujui SS; proses pengeluaran stok.',
+    description: 'Sudah disetujui SPV/SS/Admin; proses pengeluaran stok.',
     tone: 'blue',
     icon: ClipboardCheck,
   },
@@ -146,7 +146,7 @@ export function woActionsFor(wo: ActionableWo, profile: Profile, req?: WoPartReq
   if (isAdminOrSs && wo.status === 'new' && !wo.spv_id) out.push('assign_spv');
   if (isSpv && wo.status === 'assigned' && techCount === 0) out.push('assign_tech');
 
-  if (isAdminOrSs && wo.status !== 'closed' && wo.status !== 'verified' && (req?.pending ?? 0) > 0) out.push('approve_part');
+  if ((isAdminOrSs || isSpv) && wo.status !== 'closed' && wo.status !== 'verified' && (req?.pending ?? 0) > 0) out.push('approve_part');
   if (role === 'admin' && wo.status !== 'closed' && wo.status !== 'verified' && (req?.ssApproved ?? 0) > 0)
     out.push('process_part');
 
@@ -158,14 +158,17 @@ export function woActionsFor(wo: ActionableWo, profile: Profile, req?: WoPartReq
   return out;
 }
 
-/** Ambil jumlah permintaan part yang masih menunggu, per WO (admin/SS saja yang berwenang). */
+/** Ambil jumlah permintaan part yang masih menunggu per WO (admin/SS/SPV-PIC saja yang berwenang). */
 export async function fetchPartRequestCounts(profile: Profile): Promise<Record<string, WoPartRequestCounts>> {
-  if (profile.role !== 'admin' && profile.role !== 'ss') return {};
-  const { data } = await supabase
+  if (profile.role !== 'admin' && profile.role !== 'ss' && profile.role !== 'spv') return {};
+  let query = supabase
     .from('wo_part_requests')
     .select('work_order_id, status')
     .in('status', ['pending', 'ss_approved'])
     .limit(1000);
+  // SPV hanya melihat permintaan part pada WO yang menjadi PIC-nya.
+  if (profile.role === 'spv') query = query.eq('work_order.spv_id', profile.id);
+  const { data } = await query;
   const map: Record<string, WoPartRequestCounts> = {};
   for (const r of (data as { work_order_id: string; status: string }[]) ?? []) {
     const c = (map[r.work_order_id] ??= { pending: 0, ssApproved: 0 });
@@ -221,16 +224,20 @@ async function buildGroups(profile: Profile): Promise<ActionGroup[]> {
 
   // ---- Permintaan spare part dari WO --------------------------------------
   const prStatuses: string[] = [];
-  if (isAdmin || isSS) prStatuses.push('pending'); // approval SS
+  if (isAdmin || isSS || isSpv) prStatuses.push('pending'); // approval SPV/SS/admin
   if (isAdmin || isInv) prStatuses.push('ss_approved'); // proses inventory
-  const reqPromise = prStatuses.length
+  const partReqQuery = prStatuses.length
     ? supabase
         .from('wo_part_requests')
         .select('id, request_no, status, work_order_id, work_order:work_orders(wo_number)')
         .in('status', prStatuses)
         .order('requested_at', { ascending: true })
         .limit(LIMIT)
-    : Promise.resolve({ data: [] as unknown[] });
+    : null;
+  // SPV hanya melihat permintaan part pada WO yang menjadi PIC-nya.
+  const reqPromise = isSpv && partReqQuery
+    ? partReqQuery.eq('work_order.spv_id', profile.id)
+    : (partReqQuery ?? Promise.resolve({ data: [] as unknown[] }));
 
   // ---- Bon sparepart, PR numbering, stok menipis (admin / inventory) -------
   const staff = isAdmin || isInv;
@@ -302,7 +309,7 @@ async function buildGroups(profile: Profile): Promise<ActionGroup[]> {
     woId: r.work_order_id,
   });
   const pendingReqs = reqs.filter((r) => r.status === 'pending');
-  if ((isAdmin || isSS) && pendingReqs.length)
+  if ((isAdmin || isSS || isSpv) && pendingReqs.length)
     groups.push({
       key: 'req_pending',
       title: 'Permintaan part menunggu approval',
@@ -317,7 +324,7 @@ async function buildGroups(profile: Profile): Promise<ActionGroup[]> {
     groups.push({
       key: 'req_ss_approved',
       title: 'Permintaan part siap diproses',
-      description: 'Sudah disetujui SS; proses pengeluaran stok.',
+      description: 'Sudah disetujui SPV/SS/Admin; proses pengeluaran stok.',
       count: approvedReqs.length,
       tone: 'blue',
       page: 'workorders',
