@@ -1,0 +1,19 @@
+#====== MASTER GRUP (tabel inventory_groups) ======
+#kolom: name,description
+Group Mesin Utama,Grup part utama untuk mesin produksi
+Group Elektrik,Part kelistrikan dan kontrol
+
+#====== MASTER KATEGORI (tabel part_categories) ======
+#kolom: code,name
+CAT-BRG,Bearing
+CAT-SL,Seal
+
+#====== MASTER SATUAN (tabel units_of_measure) ======
+#kolom: code,name
+pcs,Pieces
+ctn,Carton
+
+#====== MASTER LOKASI (tabel part_locations) ======
+#kolom: code,name
+A-1,Rak A - Baris 1
+A-3,Rak A - Baris 3
