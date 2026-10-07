@@ -473,8 +473,9 @@ export default function WorkOrderDetail({
     setActing(false);
   }
 
-  async function loadEditAreas(deptId: string) {
-    const { data } = await supabase.from('areas').select('*').eq('department_id', deptId).order('name');
+  async function loadEditAreas() {
+    // Area terlepas dari departemen: semua area ditawarkan.
+    const { data } = await supabase.from('areas').select('*').order('name');
     setAreaList((data as Area[]) ?? []);
   }
 
@@ -505,15 +506,13 @@ export default function WorkOrderDetail({
     setShowEdit(true);
     const { data: depts } = await supabase.from('departments').select('*').order('name');
     setDeptList((depts as Department[]) ?? []);
-    await loadEditAreas(wo.department_id);
+    await loadEditAreas();
     if (wo.area_id) await loadEditEquipment(wo.area_id);
   }
 
   async function handleEditDepartment(deptId: string) {
-    setEditForm((f) => ({ ...f, department_id: deptId, area_id: '', equipment_id: '' }));
-    setEquipList([]);
-    if (deptId) await loadEditAreas(deptId);
-    else setAreaList([]);
+    // Area tidak terikat departemen, jadi area & equipment terpilih tidak direset.
+    setEditForm((f) => ({ ...f, department_id: deptId }));
   }
 
   async function handleEditArea(areaId: string) {

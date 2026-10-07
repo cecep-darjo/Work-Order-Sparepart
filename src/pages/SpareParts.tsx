@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import {
   supabase,
@@ -8,8 +8,11 @@ import {
   type UnitOfMeasure,
   type PartLocation,
 } from '@/lib/supabase';
+import { useDebouncedValue } from '@/lib/useDebouncedValue';
+import { buildIlikeOr } from '@/lib/search';
 import { Card, Badge, Button, Input, Select, Label, Modal, Textarea, Spinner, EmptyState } from '@/components/ui';
-import { Plus, Search, Pencil, Trash2, Package, AlertTriangle, TrendingUp, Sliders } from 'lucide-react';
+import { Plus, Search, Pencil, Trash2, Package, AlertTriangle, TrendingUp, Sliders, ClipboardList, FileDown } from 'lucide-react';
+import { exportOpnamePdf, exportOpnameXls } from '@/lib/stockOpname';
 
 type StockLevel = 'all' | 'low' | 'normal' | 'over';
 
@@ -17,7 +20,11 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
   const { profile } = useAuth();
   const [loading, setLoading] = useState(true);
   const [parts, setParts] = useState<SparePart[]>([]);
-  const [search, setSearch] = useState('');
+  // Teks di kolom pencarian langsung berubah; query ke server memakai nilai yang sudah ditunda (debounce).
+  const [searchInput, setSearchInput] = useState('');
+  const search = useDebouncedValue(searchInput.trim(), 300);
+  const [refreshing, setRefreshing] = useState(false);
+  const reqSeq = useRef(0);
   const [stockFilter, setStockFilter] = useState<StockLevel>(lowStockOnly ? 'low' : 'all');
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<SparePart | null>(null);
@@ -26,6 +33,21 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
   const [categories, setCategories] = useState<PartCategory[]>([]);
   const [units, setUnits] = useState<UnitOfMeasure[]>([]);
   const [locations, setLocations] = useState<PartLocation[]>([]);
+
+  // Stock Opname (lembar hitung PDF / Excel)
+  const todayIso = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  };
+  const [showOpname, setShowOpname] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [opname, setOpname] = useState({
+    scope: (lowStockOnly ? 'view' : 'all') as 'all' | 'location' | 'category' | 'view',
+    value: '',
+    blind: false,
+    format: 'pdf' as 'pdf' | 'xls',
+    date: todayIso(),
+  });
 
   const [form, setForm] = useState({
     code: '',
@@ -47,14 +69,18 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
   const canManage = profile?.role === 'admin' || profile?.role === 'inventory';
 
   const loadParts = useCallback(async () => {
-    setLoading(true);
+    // Hanya pemuatan pertama yang menampilkan spinner layar penuh. Spinner pada setiap pencarian
+    // membongkar seluruh halaman (termasuk kolom pencarian) sehingga ketikan terputus-putus.
+    const seq = ++reqSeq.current;
+    setRefreshing(true);
     let query = supabase.from('spare_parts').select('*').order('name');
 
     if (search) {
-      query = query.or(`code.ilike.%${search}%,name.ilike.%${search}%,category.ilike.%${search}%`);
+      query = query.or(buildIlikeOr(['code', 'name', 'category'], search));
     }
 
     const { data } = await query;
+    if (seq !== reqSeq.current) return; // sudah ada permintaan yang lebih baru; abaikan jawaban usang
     let filtered = (data as SparePart[]) ?? [];
 
     if (stockFilter === 'low') {
@@ -67,6 +93,7 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
 
     setParts(filtered);
     setLoading(false);
+    setRefreshing(false);
   }, [search, stockFilter]);
 
   useEffect(() => {
@@ -201,6 +228,43 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
     setActing(false);
   }
 
+  async function handleOpnameExport() {
+    if (!profile) return;
+    setExporting(true);
+    try {
+      let list: SparePart[];
+      let scopeLabel: string;
+      if (opname.scope === 'view') {
+        list = parts;
+        scopeLabel = `Sesuai tampilan layar${search ? ` (pencarian: "${search}")` : ''}`;
+      } else {
+        const { data, error } = await supabase.from('spare_parts').select('*').order('name');
+        if (error) throw error;
+        list = (data as SparePart[]) ?? [];
+        scopeLabel = 'Semua spare part';
+        if (opname.scope === 'location') {
+          list = list.filter((p) => p.location === opname.value);
+          scopeLabel = `Lokasi: ${opname.value}`;
+        } else if (opname.scope === 'category') {
+          list = list.filter((p) => p.category === opname.value);
+          scopeLabel = `Kategori: ${opname.value}`;
+        }
+      }
+      if (list.length === 0) {
+        alert('Tidak ada spare part pada cakupan ini.');
+        return;
+      }
+      const meta = { date: opname.date || todayIso(), scopeLabel, blind: opname.blind, printedBy: profile.full_name };
+      if (opname.format === 'pdf') await exportOpnamePdf(list, meta);
+      else exportOpnameXls(list, meta);
+      setShowOpname(false);
+    } catch (e) {
+      alert('Gagal membuat lembar stock opname: ' + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setExporting(false);
+    }
+  }
+
   if (loading) return <Spinner />;
 
   return (
@@ -211,8 +275,8 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
           <Input
             placeholder="Search by code, name, or category..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
             className="pl-10"
           />
         </div>
@@ -223,6 +287,11 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
             <option value="low">Low Stock</option>
             <option value="over">Over Stock</option>
           </Select>
+        )}
+        {canManage && (
+          <Button variant="secondary" onClick={() => setShowOpname(true)}>
+            <ClipboardList className="w-4 h-4" /> Stock Opname
+          </Button>
         )}
         {canManage && (
           <Button onClick={openCreate}>
@@ -246,7 +315,7 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
           <EmptyState message={lowStockOnly ? 'No low stock items - all levels are normal' : 'No spare parts found'} />
         </Card>
       ) : (
-        <div className="grid gap-3">
+        <div className={`grid gap-3 transition-opacity ${refreshing ? 'opacity-60' : ''}`}>
           {parts.map((part) => {
             const status = stockStatus(part);
             return (
@@ -308,6 +377,91 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
           })}
         </div>
       )}
+
+      {/* Stock Opname Modal */}
+      <Modal open={showOpname} onClose={() => setShowOpname(false)} title="Stock Opname" maxWidth="max-w-lg">
+        <div className="space-y-4">
+          <p className="text-sm text-slate-500">
+            Buat lembar hitung untuk dibawa ke gudang. Kolom Stok Fisik dikosongkan untuk diisi saat penghitungan.
+          </p>
+
+          <div>
+            <Label>Cakupan</Label>
+            <Select
+              value={opname.scope}
+              onChange={(e) => setOpname((o) => ({ ...o, scope: e.target.value as typeof o.scope, value: '' }))}
+            >
+              <option value="all">Semua spare part</option>
+              <option value="location">Per lokasi</option>
+              <option value="category">Per kategori</option>
+              <option value="view">Sesuai tampilan layar saat ini ({parts.length} item)</option>
+            </Select>
+          </div>
+
+          {opname.scope === 'location' && (
+            <div>
+              <Label>Lokasi *</Label>
+              <Select value={opname.value} onChange={(e) => setOpname((o) => ({ ...o, value: e.target.value }))}>
+                <option value="">Pilih lokasi...</option>
+                {locations.map((l) => (
+                  <option key={l.id} value={l.name}>{l.name}</option>
+                ))}
+              </Select>
+            </div>
+          )}
+          {opname.scope === 'category' && (
+            <div>
+              <Label>Kategori *</Label>
+              <Select value={opname.value} onChange={(e) => setOpname((o) => ({ ...o, value: e.target.value }))}>
+                <option value="">Pilih kategori...</option>
+                {categories.map((c) => (
+                  <option key={c.id} value={c.name}>{c.name}</option>
+                ))}
+              </Select>
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <Label>Tanggal Opname</Label>
+              <Input type="date" value={opname.date} onChange={(e) => setOpname((o) => ({ ...o, date: e.target.value }))} />
+            </div>
+            <div>
+              <Label>Format</Label>
+              <Select value={opname.format} onChange={(e) => setOpname((o) => ({ ...o, format: e.target.value as 'pdf' | 'xls' }))}>
+                <option value="pdf">PDF (cetak)</option>
+                <option value="xls">Excel (.xls)</option>
+              </Select>
+            </div>
+          </div>
+
+          <label className="flex items-start gap-2 text-sm text-slate-700 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={opname.blind}
+              onChange={(e) => setOpname((o) => ({ ...o, blind: e.target.checked }))}
+              className="mt-0.5 h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+            />
+            <span>
+              Hitung buta (sembunyikan stok sistem)
+              <span className="block text-xs text-slate-400">
+                PDF: kolom Stok Sistem &amp; Selisih tidak dicetak. Excel: kolom Stok Sistem disembunyikan, Selisih tetap terhitung.
+              </span>
+            </span>
+          </label>
+
+          <div className="flex justify-end gap-3 pt-2">
+            <Button variant="secondary" onClick={() => setShowOpname(false)}>Batal</Button>
+            <Button
+              onClick={handleOpnameExport}
+              disabled={exporting || (opname.scope !== 'all' && opname.scope !== 'view' && !opname.value)}
+            >
+              <FileDown className="w-4 h-4" />
+              {exporting ? 'Membuat...' : 'Unduh Lembar Opname'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       {/* Create/Edit Modal */}
       <Modal open={showForm} onClose={() => setShowForm(false)} title={editing ? 'Edit Spare Part' : 'Add Spare Part'} maxWidth="max-w-2xl">

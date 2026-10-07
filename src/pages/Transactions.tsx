@@ -1,5 +1,6 @@
 import { uuid } from '@/lib/uuid';
 import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useDebouncedValue } from '@/lib/useDebouncedValue';
 import { useAuth } from '@/context/AuthContext';
 import {
   supabase,
@@ -63,9 +64,11 @@ export default function Transactions() {
   const { profile } = useAuth();
   const canTransact = profile?.role === 'admin' || profile?.role === 'inventory';
   const [loading, setLoading] = useState(true);
-  const [transactions, setTransactions] = useState<InventoryTransaction[]>([]);
+  const [allTransactions, setAllTransactions] = useState<InventoryTransaction[]>([]);
   const [parts, setParts] = useState<SparePart[]>([]);
-  const [search, setSearch] = useState('');
+  // Input langsung berubah; penyaringan memakai nilai tertunda (debounce) dan dilakukan di klien.
+  const [searchInput, setSearchInput] = useState('');
+  const search = useDebouncedValue(searchInput.trim(), 250);
   const [typeFilter, setTypeFilter] = useState('all');
   const [partFilter, setPartFilter] = useState('all');
   const [showReceipt, setShowReceipt] = useState(false);
@@ -97,8 +100,8 @@ export default function Transactions() {
   const [loadingPrs, setLoadingPrs] = useState(false);
   const [recallSupplier, setRecallSupplier] = useState('');
 
+  // Data hanya diambil saat halaman dibuka / setelah transaksi (bukan pada tiap ketikan atau ganti filter).
   const load = useCallback(async () => {
-    setLoading(true);
     const [{ data: sp }, { data }] = await Promise.all([
       supabase.from('spare_parts').select('*').order('name'),
       supabase
@@ -107,10 +110,17 @@ export default function Transactions() {
         .order('created_at', { ascending: false }),
     ]);
     setParts((sp as SparePart[]) ?? []);
-    let txns = (data as unknown as InventoryTransaction[]) ?? [];
+    setAllTransactions((data as unknown as InventoryTransaction[]) ?? []);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const transactions = useMemo(() => {
+    let txns = allTransactions;
     if (typeFilter !== 'all') txns = txns.filter((t) => t.type === typeFilter);
     if (partFilter !== 'all') txns = txns.filter((t) => t.spare_part_id === partFilter);
-    if (search.trim()) {
+    if (search) {
       const s = search.toLowerCase();
       txns = txns.filter((t) =>
         t.spare_part?.name?.toLowerCase().includes(s) ||
@@ -121,11 +131,8 @@ export default function Transactions() {
         ((t as InventoryTransaction & { transaction_no?: string }).transaction_no ?? '').toLowerCase().includes(s)
       );
     }
-    setTransactions(txns);
-    setLoading(false);
-  }, [search, typeFilter, partFilter]);
-
-  useEffect(() => { load(); }, [load]);
+    return txns;
+  }, [allTransactions, typeFilter, partFilter, search]);
 
   async function openReceipt() {
     setReceiptLines([]);
@@ -510,7 +517,7 @@ export default function Transactions() {
       <div className="flex flex-col lg:flex-row lg:items-center gap-3">
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-          <Input placeholder="Cari no. transaksi, part, referensi..." value={search} onChange={(e) => setSearch(e.target.value)} className="pl-10" />
+          <Input placeholder="Cari no. transaksi, part, referensi..." value={searchInput} onChange={(e) => setSearchInput(e.target.value)} className="pl-10" />
         </div>
         {canTransact && (
           <div className="flex gap-2">

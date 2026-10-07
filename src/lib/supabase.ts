@@ -73,7 +73,8 @@ export type Department = {
 
 export type Area = {
   id: string;
-  department_id: string;
+  /** Legacy: area kini terlepas dari departemen; kolom dipertahankan tetapi tidak dipakai. */
+  department_id: string | null;
   name: string;
   created_at: string;
 };

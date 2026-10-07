@@ -40,8 +40,8 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
   const [loading, setLoading] = useState(true);
 
   const [departments, setDepartments] = useState<Department[]>([]);
-  const [areas, setAreas] = useState<(Area & { department?: Department })[]>([]);
-  const [equipment, setEquipment] = useState<(Equipment & { area?: Area & { department?: Department } })[]>([]);
+  const [areas, setAreas] = useState<Area[]>([]);
+  const [equipment, setEquipment] = useState<(Equipment & { area?: Area })[]>([]);
   const [users, setUsers] = useState<Profile[]>([]);
   const [categories, setCategories] = useState<PartCategory[]>([]);
   const [units, setUnits] = useState<UnitOfMeasure[]>([]);
@@ -56,7 +56,7 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
 
   // Form state
   const [deptForm, setDeptForm] = useState({ name: '', code: '' });
-  const [areaForm, setAreaForm] = useState({ department_id: '', name: '' });
+  const [areaForm, setAreaForm] = useState({ name: '' });
   const [equipForm, setEquipForm] = useState({ area_id: '', name: '', code: '' });
   const [userForm, setUserForm] = useState({
     username: '',
@@ -78,13 +78,13 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
     if (scope === 'wo') {
       const [{ data: d }, { data: a }, { data: e }, { data: u }] = await Promise.all([
         supabase.from('departments').select('*').order('name'),
-        supabase.from('areas').select('*, department:departments(*)').order('name'),
-        supabase.from('equipment').select('*, area:areas(*, department:departments(*))').order('name'),
+        supabase.from('areas').select('*').order('name'),
+        supabase.from('equipment').select('*, area:areas(*)').order('name'),
         supabase.from('profiles').select('*').order('full_name'),
       ]);
       setDepartments((d as Department[]) ?? []);
-      setAreas((a as unknown as (Area & { department?: Department })[]) ?? []);
-      setEquipment((e as unknown as (Equipment & { area?: Area & { department?: Department } })[]) ?? []);
+      setAreas((a as unknown as Area[]) ?? []);
+      setEquipment((e as unknown as (Equipment & { area?: Area })[]) ?? []);
       setUsers((u as Profile[]) ?? []);
     } else {
       const [{ data: cat }, { data: un }, { data: loc }, { data: sup }, { data: gr }] = await Promise.all([
@@ -113,7 +113,7 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
 
   function openCreate(type: Tab) {
     if (type === 'departments') setDeptForm({ name: '', code: '' });
-    if (type === 'areas') setAreaForm({ department_id: '', name: '' });
+    if (type === 'areas') setAreaForm({ name: '' });
     if (type === 'equipment') setEquipForm({ area_id: '', name: '', code: '' });
     if (type === 'users') setUserForm({ username: '', full_name: '', role: 'teknisi', department_id: '', password: '' });
     if (isSimpleMaster(type)) setSimpleForm({ name: '', code: '' });
@@ -123,7 +123,7 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
 
   function openEdit(type: Tab, id: string, data: Record<string, unknown>) {
     if (type === 'departments') setDeptForm({ name: data.name as string, code: data.code as string });
-    if (type === 'areas') setAreaForm({ department_id: data.department_id as string, name: data.name as string });
+    if (type === 'areas') setAreaForm({ name: data.name as string });
     if (type === 'equipment') setEquipForm({ area_id: data.area_id as string, name: data.name as string, code: (data.code as string) ?? '' });
     if (type === 'users') {
       setUserForm({
@@ -151,9 +151,9 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
       }
     } else if (editing.type === 'areas') {
       if (editing.id) {
-        await supabase.from('areas').update({ department_id: areaForm.department_id, name: areaForm.name }).eq('id', editing.id);
+        await supabase.from('areas').update({ name: areaForm.name.trim() }).eq('id', editing.id);
       } else {
-        await supabase.from('areas').insert({ department_id: areaForm.department_id, name: areaForm.name });
+        await supabase.from('areas').insert({ name: areaForm.name.trim() });
       }
     } else if (editing.type === 'equipment') {
       if (editing.id) {
@@ -368,10 +368,7 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
           <div className="space-y-2">
             {areas.map((a) => (
               <div key={a.id} className="flex items-center justify-between p-3 rounded-lg bg-slate-50">
-                <div>
-                  <p className="text-sm font-medium text-slate-900">{a.name}</p>
-                  <p className="text-xs text-slate-400">{a.department?.name ?? '-'}</p>
-                </div>
+                <p className="text-sm font-medium text-slate-900">{a.name}</p>
                 <div className="flex gap-1">
                   <button onClick={() => openEdit('areas', a.id, a)} className="p-2 text-slate-500 hover:bg-slate-200 rounded-lg">
                     <Pencil className="w-4 h-4" />
@@ -393,7 +390,7 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
                 <div>
                   <p className="text-sm font-medium text-slate-900">{eq.name}</p>
                   <p className="text-xs text-slate-400">
-                    {eq.area?.name ?? '-'} • {eq.area?.department?.name ?? '-'}
+                    {eq.area?.name ?? '-'}
                   </p>
                 </div>
                 <div className="flex gap-1">
@@ -536,15 +533,6 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
           {editing?.type === 'areas' && (
             <>
               <div>
-                <Label>Department *</Label>
-                <Select value={areaForm.department_id} onChange={(e) => setAreaForm((f) => ({ ...f, department_id: e.target.value }))}>
-                  <option value="">Select department...</option>
-                  {departments.map((d) => (
-                    <option key={d.id} value={d.id}>{d.name}</option>
-                  ))}
-                </Select>
-              </div>
-              <div>
                 <Label>Area Name *</Label>
                 <Input value={areaForm.name} onChange={(e) => setAreaForm((f) => ({ ...f, name: e.target.value }))} placeholder="Plant 1 Area A" />
               </div>
@@ -558,7 +546,7 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
                 <Select value={equipForm.area_id} onChange={(e) => setEquipForm((f) => ({ ...f, area_id: e.target.value }))}>
                   <option value="">Select area...</option>
                   {areas.map((a) => (
-                    <option key={a.id} value={a.id}>{a.name} ({a.department?.name})</option>
+                    <option key={a.id} value={a.id}>{a.name}</option>
                   ))}
                 </Select>
               </div>

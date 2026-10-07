@@ -20,7 +20,7 @@ import {
 import { useDebouncedValue } from '@/lib/useDebouncedValue';
 import { buildIlikeOr } from '@/lib/search';
 import { Card, Badge, Button, Input, Select, Label, Modal, Textarea, Spinner, EmptyState } from '@/components/ui';
-import { BellRing, Plus, Search } from 'lucide-react';
+import { BellRing, ClipboardCheck, Plus, Search } from 'lucide-react';
 import {
   WO_ACTION_META,
   fetchPartRequestCounts,
@@ -67,6 +67,8 @@ export default function WorkOrders({
   const [onlyMine, setOnlyMine] = useState(false); // SPV: hanya WO dengan dirinya sebagai PIC
   const [onlyAction, setOnlyAction] = useState(false); // hanya WO yang menunggu aksi user
   const [partReqs, setPartReqs] = useState<Record<string, WoPartRequestCounts>>({});
+  // WO yang punya permintaan part berstatus 'pending' (menunggu approval); tampil untuk semua role.
+  const [waitingPartWo, setWaitingPartWo] = useState<Set<string>>(new Set());
 
   const loadWorkOrders = useCallback(async () => {
     if (!profile) return;
@@ -95,10 +97,16 @@ export default function WorkOrders({
       query = query.or(buildIlikeOr(['wo_number', 'problem_description'], search));
     }
 
-    const [{ data }, reqCounts] = await Promise.all([query, fetchPartRequestCounts(profile)]);
+    const [{ data }, reqCounts, { data: pendingRows }] = await Promise.all([
+      query,
+      fetchPartRequestCounts(profile),
+      // RLS tetap berlaku: user hanya mendapat permintaan pada WO yang boleh ia lihat.
+      supabase.from('wo_part_requests').select('work_order_id').eq('status', 'pending').limit(1000),
+    ]);
     if (seq !== reqSeq.current) return; // sudah ada permintaan yang lebih baru; abaikan jawaban usang
     setWorkOrders((data as unknown as WorkOrder[]) ?? []);
     setPartReqs(reqCounts);
+    setWaitingPartWo(new Set(((pendingRows as { work_order_id: string }[]) ?? []).map((r) => r.work_order_id)));
     setLoading(false);
     setRefreshing(false);
   }, [profile, statusFilter, search, onlyMine]);
@@ -108,21 +116,16 @@ export default function WorkOrders({
   }, [loadWorkOrders]);
 
   async function loadCreateData() {
-    const [{ data: depts }, { data: spvs }, { data: users }] = await Promise.all([
+    const [{ data: depts }, { data: spvs }, { data: users }, { data: areaRows }] = await Promise.all([
       supabase.from('departments').select('*').order('name'),
       supabase.from('profiles').select('*').in('role', ['spv', 'ss']).eq('is_active', true).order('full_name'),
       supabase.from('profiles').select('*').eq('is_active', true).not('username', 'is', null).order('full_name'),
+      supabase.from('areas').select('*').order('name'), // area terlepas dari departemen
     ]);
+    setAreas((areaRows as Area[]) ?? []);
     setDepartments((depts as Department[]) ?? []);
     setSpvList((spvs as Profile[]) ?? []);
     setUserList((users as Profile[]) ?? []);
-  }
-
-  async function loadAreas(deptId: string) {
-    const { data } = await supabase.from('areas').select('*').eq('department_id', deptId).order('name');
-    setAreas((data as Area[]) ?? []);
-    setEquipmentList([]);
-    setCreateForm((f) => ({ ...f, area_id: '', equipment_id: '' }));
   }
 
   async function loadEquipment(areaId: string) {
@@ -284,6 +287,9 @@ export default function WorkOrders({
         <div className={`grid gap-3 transition-opacity ${refreshing ? 'opacity-60' : ''}`}>
           {visibleWorkOrders.map((wo) => {
             const actions = actionsByWo.get(wo.id) ?? [];
+            // WO yang sudah selesai/dibatalkan tidak lagi menunggu approval part.
+            const waitingPart =
+              waitingPartWo.has(wo.id) && !['verified', 'closed', 'canceled'].includes(wo.status);
             return (
             <Card
               key={wo.id}
@@ -334,9 +340,17 @@ export default function WorkOrders({
                       </div>
                     )}
                   </div>
-                  <Badge className={STATUS_COLORS[wo.status] + ' flex-shrink-0'}>
-                    {STATUS_LABELS[wo.status]}
-                  </Badge>
+                  <div className="flex items-center justify-end gap-2 flex-wrap flex-shrink-0">
+                    {waitingPart && (
+                      <Badge className="bg-amber-100 text-amber-800 border-amber-300 inline-flex items-center gap-1">
+                        <ClipboardCheck className="w-3 h-3" />
+                        Menunggu Approval Part
+                      </Badge>
+                    )}
+                    <Badge className={STATUS_COLORS[wo.status] + ' flex-shrink-0'}>
+                      {STATUS_LABELS[wo.status]}
+                    </Badge>
+                  </div>
                 </div>
                 <div className="flex items-center gap-4 text-xs text-slate-400 flex-wrap">
                   {wo.department && <span>{wo.department.name}</span>}
@@ -365,10 +379,7 @@ export default function WorkOrders({
             <Label>Department *</Label>
             <Select
               value={createForm.department_id}
-              onChange={(e) => {
-                setCreateForm((f) => ({ ...f, department_id: e.target.value }));
-                loadAreas(e.target.value);
-              }}
+              onChange={(e) => setCreateForm((f) => ({ ...f, department_id: e.target.value }))}
             >
               <option value="">Select department...</option>
               {departments.map((d) => (
