@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import {
   supabase,
+  fetchAllRows,
   ROLE_LABELS,
   GR_KIND_LABELS,
   type Role,
@@ -87,17 +88,17 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
       setEquipment((e as unknown as (Equipment & { area?: Area })[]) ?? []);
       setUsers((u as Profile[]) ?? []);
     } else {
-      const [{ data: cat }, { data: un }, { data: loc }, { data: sup }, { data: gr }] = await Promise.all([
+      const [{ data: cat }, { data: un }, { data: loc }, sup, { data: gr }] = await Promise.all([
         supabase.from('part_categories').select('*').order('name'),
         supabase.from('units_of_measure').select('*').order('name'),
         supabase.from('part_locations').select('*').order('name'),
-        supabase.from('inventory_suppliers').select('*').order('name'),
+        fetchAllRows<InventorySupplier>('inventory_suppliers', '*', 'name'),
         supabase.rpc('get_gr_start_numbers'),
       ]);
       setCategories((cat as PartCategory[]) ?? []);
       setUnits((un as UnitOfMeasure[]) ?? []);
       setLocations((loc as PartLocation[]) ?? []);
-      setSuppliers((sup as InventorySupplier[]) ?? []);
+      setSuppliers(sup);
 
       const next: Record<GRKind, number> = { credit: 1, cash: 1, import: 1 };
       ((gr as { gr_kind: GRKind; start_no: number }[] | null) ?? []).forEach((r) => {

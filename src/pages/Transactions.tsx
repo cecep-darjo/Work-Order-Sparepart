@@ -4,6 +4,7 @@ import { useDebouncedValue } from '@/lib/useDebouncedValue';
 import { useAuth } from '@/context/AuthContext';
 import {
   supabase,
+  fetchAllRows,
   TX_TYPE_LABELS,
   TX_TYPE_COLORS,
   GR_KIND_LABELS,
@@ -11,13 +12,16 @@ import {
   type SparePart,
 } from '@/lib/supabase';
 import { Card, Badge, Button, Select, Input, Label, Modal, Textarea, Spinner, EmptyState } from '@/components/ui';
-import { SearchablePicker } from '@/components/Pickers';
+import { SearchablePicker, type PickerOption } from '@/components/Pickers';
 import EditTransactionModal from '@/components/EditTransactionModal';
 import { BON_SELECT, bonRemaining, type Bon, type BonItem } from '@/lib/bons';
 import { printIssueSlipByNo, printLegacyIssue } from '@/lib/manualIssue';
-import { Search, ArrowDownToLine, ArrowUpFromLine, PackageSearch, RefreshCw, FileDown, Plus, Trash2, Paperclip, ClipboardCheck, Pencil } from 'lucide-react';
+import { Search, ArrowDownToLine, ArrowUpFromLine, PackageSearch, RefreshCw, FileDown, Plus, Trash2, Paperclip, ClipboardCheck, Pencil, ArrowUp, ArrowDown, ArrowUpDown } from 'lucide-react';
 
 type GRKind = 'credit' | 'cash' | 'import';
+
+/** Kunci sorting untuk daftar transaksi inventory. */
+type SortKey = 'created_at' | 'name' | 'type' | 'quantity' | 'balance_after' | 'gr_no' | 'notes';
 
 /** Satu baris pada daftar pengeluaran. Baris dari bon membawa bon_item_id + batas sisa bon. */
 type IssueLine = {
@@ -57,6 +61,12 @@ function remaining(i: RecallItem): number {
   return Math.round((Number(i.quantity) - Number(i.received_qty)) * 1000) / 1000;
 }
 
+/** Ikon urutan (sort) di header kolom tabel. */
+function SortIcon({ active, dir }: { active: boolean; dir: 1 | -1 }) {
+  if (!active) return <ArrowUpDown className="w-3.5 h-3.5 text-slate-300" />;
+  return dir === 1 ? <ArrowUp className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />;
+}
+
 const MAX_GR_FILE_SIZE = 5 * 1024 * 1024;
 const ALLOWED_GR_MIME = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
 
@@ -71,6 +81,12 @@ export default function Transactions() {
   const search = useDebouncedValue(searchInput.trim(), 250);
   const [typeFilter, setTypeFilter] = useState('all');
   const [partFilter, setPartFilter] = useState('all');
+  // Pengurutan kolom: default Tanggal terbaru dulu.
+  const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: 'created_at', dir: -1 });
+
+  function toggleSort(key: SortKey) {
+    setSort((s) => (s.key === key ? { key, dir: s.dir === 1 ? -1 : 1 } : { key, dir: 1 }));
+  }
   const [showReceipt, setShowReceipt] = useState(false);
   const [acting, setActing] = useState(false);
   const [showIssue, setShowIssue] = useState(false);
@@ -99,17 +115,19 @@ export default function Transactions() {
   const [openPrs, setOpenPrs] = useState<RecallPR[]>([]);
   const [loadingPrs, setLoadingPrs] = useState(false);
   const [recallSupplier, setRecallSupplier] = useState('');
+  // Daftar supplier dari database (untuk memilih sumber barang pemasukan).
+  const [receiptSuppliers, setReceiptSuppliers] = useState<PickerOption[]>([]);
 
   // Data hanya diambil saat halaman dibuka / setelah transaksi (bukan pada tiap ketikan atau ganti filter).
   const load = useCallback(async () => {
-    const [{ data: sp }, { data }] = await Promise.all([
-      supabase.from('spare_parts').select('*').order('name'),
+    const [allSp, { data }] = await Promise.all([
+      fetchAllRows<SparePart>('spare_parts', '*', 'name'),
       supabase
         .from('inventory_transactions')
         .select('*, spare_part:spare_parts(*)')
         .order('created_at', { ascending: false }),
     ]);
-    setParts((sp as SparePart[]) ?? []);
+    setParts(allSp ?? []);
     setAllTransactions((data as unknown as InventoryTransaction[]) ?? []);
     setLoading(false);
   }, []);
@@ -131,8 +149,27 @@ export default function Transactions() {
         ((t as InventoryTransaction & { transaction_no?: string }).transaction_no ?? '').toLowerCase().includes(s)
       );
     }
-    return txns;
-  }, [allTransactions, typeFilter, partFilter, search]);
+    // Sort kolom.
+    const get = (t: InventoryTransaction): string | number => {
+      switch (sort.key) {
+        case 'created_at': return new Date(t.created_at).getTime();
+        case 'name': return (t.spare_part?.name ?? '').toLowerCase();
+        case 'type': return TX_TYPE_LABELS[t.type] ?? t.type;
+        case 'quantity': return Number(t.quantity);
+        case 'balance_after': return Number(t.balance_after ?? 0);
+        case 'gr_no': return t.gr_no ?? '';
+        case 'notes': return t.notes ?? '';
+        default: return 0;
+      }
+    };
+    return [...txns].sort((a, b) => {
+      const av = get(a);
+      const bv = get(b);
+      if (av < bv) return -1 * sort.dir;
+      if (av > bv) return 1 * sort.dir;
+      return 0;
+    });
+  }, [allTransactions, typeFilter, partFilter, search, sort]);
 
   async function openReceipt() {
     setReceiptLines([]);
@@ -143,20 +180,29 @@ export default function Transactions() {
     setPreviewGrNo(null);
     setRecallSupplier('');
     setOpenPrs([]);
+    setReceiptSuppliers([]);
     setShowReceipt(true);
 
-    // PR yang sudah bernomor & masih punya sisa barang -> bisa dipanggil berdasarkan supplier.
+    // Load PR bernomor (untuk "Panggil dari PR" berdasar supplier) + daftar supplier database utk sumber barang.
     setLoadingPrs(true);
-    const { data } = await supabase
-      .from('purchase_requirements')
-      .select(
-        'id, pr_no, sap_no, supplier_id, created_at, supplier:inventory_suppliers(id, code, name), items:purchase_requirement_items(id, spare_part_id, spare_part_name, quantity, received_qty)'
-      )
-      .eq('status', 'numbered')
-      .order('created_at', { ascending: true });
-    const rows = ((data as unknown as RecallPR[]) ?? []).filter((pr) => (pr.items ?? []).some((i) => remaining(i) > 0));
+    const [prRes, supp] = await Promise.all([
+      supabase
+        .from('purchase_requirements')
+        .select(
+          'id, pr_no, sap_no, supplier_id, created_at, supplier:inventory_suppliers(id, code, name), items:purchase_requirement_items(id, spare_part_id, spare_part_name, quantity, received_qty)'
+        )
+        .eq('status', 'numbered')
+        .order('created_at', { ascending: true }),
+      fetchAllRows<{ id: string; code: string; name: string }>('inventory_suppliers', 'id, code, name', 'name'),
+    ]);
+    const rows = ((prRes.data as unknown as RecallPR[]) ?? []).filter((pr) => (pr.items ?? []).some((i) => remaining(i) > 0));
     setOpenPrs(rows);
     setLoadingPrs(false);
+    setReceiptSuppliers(supp.map((s) => ({
+      value: `${s.code} - ${s.name}`,
+      label: `${s.code} - ${s.name}`,
+      search: `${s.code} ${s.name}`,
+    })));
   }
 
   function fmtSize(bytes: number): string {
@@ -217,14 +263,22 @@ export default function Transactions() {
     setPreviewGrNo(String(data));
   }
 
-  const recallSuppliers = useMemo(() => {
-    const map = new Map<string, { id: string; label: string; count: number }>();
+  const recallSuppliers = useMemo<PickerOption[]>(() => {
+    const map = new Map<string, { label: string; count: number }>();
     for (const pr of openPrs) {
+      if (!pr.supplier_id) continue;
       const cur = map.get(pr.supplier_id);
       if (cur) cur.count += 1;
-      else map.set(pr.supplier_id, { id: pr.supplier_id, label: pr.supplier ? `${pr.supplier.code} - ${pr.supplier.name}` : '(supplier tidak diketahui)', count: 1 });
+      else map.set(pr.supplier_id, { label: pr.supplier ? `${pr.supplier.code} - ${pr.supplier.name}` : '(supplier tidak diketahui)', count: 1 });
     }
-    return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label));
+    return Array.from(map.entries())
+      .map(([id, s]) => ({
+        value: id,
+        label: s.label,
+        right: `${s.count} PR`,
+        search: `${s.label} ${s.count}`,
+      }))
+      .sort((a, b) => a.label.localeCompare(b.label));
   }, [openPrs]);
 
   const recallPrs = useMemo(() => openPrs.filter((pr) => pr.supplier_id === recallSupplier), [openPrs, recallSupplier]);
@@ -552,24 +606,49 @@ export default function Transactions() {
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-xs text-slate-500 uppercase">
                 <tr>
-                  <th className="text-left px-4 py-3">Transaksi</th>
-                  <th className="text-left px-4 py-3">No. GR</th>
-                  <th className="text-left px-4 py-3">Tanggal</th>
-                  <th className="text-left px-4 py-3">Spare Part</th>
-                  <th className="text-left px-4 py-3">Jenis</th>
-                  <th className="text-right px-4 py-3">Qty</th>
-                  <th className="text-right px-4 py-3">Saldo</th>
+                  <th className="text-left px-4 py-3">
+                    <button type="button" onClick={() => toggleSort('gr_no')} className="inline-flex items-center gap-1 hover:text-slate-800">
+                      No. GR <SortIcon active={sort.key === 'gr_no'} dir={sort.dir} />
+                    </button>
+                  </th>
+                  <th className="text-left px-4 py-3">
+                    <button type="button" onClick={() => toggleSort('created_at')} className="inline-flex items-center gap-1 hover:text-slate-800">
+                      Tanggal <SortIcon active={sort.key === 'created_at'} dir={sort.dir} />
+                    </button>
+                  </th>
+                  <th className="text-left px-4 py-3 w-1/3 min-w-[14rem]">
+                    <button type="button" onClick={() => toggleSort('name')} className="inline-flex items-center gap-1 hover:text-slate-800">
+                      Spare Part <SortIcon active={sort.key === 'name'} dir={sort.dir} />
+                    </button>
+                  </th>
+                  <th className="text-left px-4 py-3">
+                    <button type="button" onClick={() => toggleSort('type')} className="inline-flex items-center gap-1 hover:text-slate-800">
+                      Jenis <SortIcon active={sort.key === 'type'} dir={sort.dir} />
+                    </button>
+                  </th>
+                  <th className="text-right px-4 py-3">
+                    <button type="button" onClick={() => toggleSort('quantity')} className="inline-flex items-center gap-1 hover:text-slate-800">
+                      Qty <SortIcon active={sort.key === 'quantity'} dir={sort.dir} />
+                    </button>
+                  </th>
+                  <th className="text-right px-4 py-3">
+                    <button type="button" onClick={() => toggleSort('balance_after')} className="inline-flex items-center gap-1 hover:text-slate-800">
+                      Saldo <SortIcon active={sort.key === 'balance_after'} dir={sort.dir} />
+                    </button>
+                  </th>
                   <th className="text-left px-4 py-3">Referensi</th>
-                  <th className="text-left px-4 py-3">Keterangan</th>
+                  <th className="text-left px-4 py-3">
+                    <button type="button" onClick={() => toggleSort('notes')} className="inline-flex items-center gap-1 hover:text-slate-800">
+                      Keterangan <SortIcon active={sort.key === 'notes'} dir={sort.dir} />
+                    </button>
+                  </th>
                   <th className="text-right px-4 py-3">Dokumen</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {transactions.map((tx) => {
-                  const extended = tx as InventoryTransaction & { transaction_no?: string; stock_before?: number | null };
                   return (
                     <tr key={tx.id} className="hover:bg-slate-50">
-                      <td className="px-4 py-3 font-medium text-slate-700 whitespace-nowrap">{extended.transaction_no ?? '-'}{tx.issue_slip_no && <div className="text-xs font-normal text-slate-400">{tx.issue_slip_no}</div>}</td>
                       <td className="px-4 py-3 text-xs text-slate-500 whitespace-nowrap">
                         {tx.gr_no ? (
                           <>
@@ -579,7 +658,7 @@ export default function Transactions() {
                         ) : '-'}
                       </td>
                       <td className="px-4 py-3 text-xs text-slate-500 whitespace-nowrap">{new Date(tx.created_at).toLocaleString('id-ID')}</td>
-                      <td className="px-4 py-3"><b>{tx.spare_part?.code}</b><div className="text-xs text-slate-500">{tx.spare_part?.name}</div></td>
+                      <td className="px-4 py-3 w-1/3 min-w-[14rem]"><b>{tx.spare_part?.name}</b><div className="text-xs text-slate-500">{tx.spare_part?.code}</div></td>
                       <td className="px-4 py-3"><Badge className={TX_TYPE_COLORS[tx.type]}>{TX_TYPE_LABELS[tx.type]}</Badge></td>
                       <td className="px-4 py-3 text-right font-medium">{tx.type === 'stock_out' ? '-' : tx.type === 'stock_in' ? '+' : ''}{tx.quantity} {tx.spare_part?.unit}</td>
                       <td className="px-4 py-3 text-right text-slate-600">{tx.balance_after ?? '-'}</td>
@@ -667,11 +746,14 @@ export default function Transactions() {
               </Select>
             </div>
             <div>
-              <Label>Sumber Barang</Label>
-              <Input
-                placeholder="Kosong = otomatis nama supplier PR"
+              <Label>Supplier</Label>
+              <SearchablePicker
+                inline
                 value={receiptForm.source}
-                onChange={(e) => setReceiptForm((f) => ({ ...f, source: e.target.value }))}
+                onChange={(v) => setReceiptForm((f) => ({ ...f, source: v }))}
+                placeholder="Cari & pilih supplier..."
+                emptyText="Supplier tidak ditemukan"
+                options={receiptSuppliers}
               />
             </div>
           </div>
@@ -702,12 +784,14 @@ export default function Transactions() {
               <>
                 <div>
                   <Label>Supplier</Label>
-                  <Select value={recallSupplier} onChange={(e) => setRecallSupplier(e.target.value)}>
-                    <option value="">Pilih supplier...</option>
-                    {recallSuppliers.map((s) => (
-                      <option key={s.id} value={s.id}>{s.label} ({s.count} PR)</option>
-                    ))}
-                  </Select>
+                  <SearchablePicker
+                    inline
+                    value={recallSupplier}
+                    onChange={setRecallSupplier}
+                    placeholder="Cari supplier..."
+                    emptyText="Supplier tidak ditemukan"
+                    options={recallSuppliers}
+                  />
                 </div>
                 {recallSupplier && (
                   <div className="space-y-2">

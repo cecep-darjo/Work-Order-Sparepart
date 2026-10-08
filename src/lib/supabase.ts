@@ -300,3 +300,34 @@ export const GR_KIND_LABELS: Record<'credit' | 'cash' | 'import', string> = {
   cash: 'Cash (STSB)',
   import: 'Import (SKIS)',
 };
+
+/**
+ * Ambil SEMUA baris dari suatu tabel sekaligus, melewati batas default PostgREST
+ * (±1.000 baris/query) dengan pagination `.range()` (chunk 1000).
+ * Mengembalikan array kosong jika gagal (supaya tidak menghentikan aliran UI yang
+ * memakai `?? []`). Cocok untuk data master yang bisa > 1000 baris (mis. inventory_suppliers).
+ */
+export async function fetchAllRows<T>(
+  table: string,
+  select: string,
+  order: string,
+  ascending = true
+): Promise<T[]> {
+  const chunk = 1000;
+  const all: T[] = [];
+  let offset = 0;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const { data, error } = await supabase
+      .from(table)
+      .select(select)
+      .order(order, { ascending })
+      .range(offset, offset + chunk - 1);
+    if (error) return all; // gagal sebagian → kembali data yang sudah terkumpul
+    const rows = (data as T[]) ?? [];
+    all.push(...rows);
+    if (rows.length < chunk) break;
+    offset += chunk;
+  }
+  return all;
+}

@@ -1,7 +1,7 @@
 import { uuid } from '@/lib/uuid';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { supabase, type Profile } from '@/lib/supabase';
+import { supabase, fetchAllRows, type Profile } from '@/lib/supabase';
 import { Badge, Button, Card, Input, Label, Modal, Select, Spinner, Textarea } from '@/components/ui';
 import { SearchablePicker } from '@/components/Pickers';
 import type { PageKey } from '@/components/Layout';
@@ -732,19 +732,19 @@ export default function PurchaseRequirements() {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [{ data: req }, { data: users }, { data: sups }, { data: sp }] = await Promise.all([
+    const [{ data: req }, { data: users }, sups, allSp] = await Promise.all([
       supabase.from('purchase_requirements').select(PR_SELECT).order('created_at', { ascending: false }),
       supabase.from('profiles').select('*').eq('is_active', true).order('full_name'),
-      supabase.from('inventory_suppliers').select('id, code, name').order('name'),
-      supabase.from('spare_parts').select('id, code, name, unit, category, location, current_stock').order('name'),
+      fetchAllRows<{ id: string; code: string; name: string }>('inventory_suppliers', 'id, code, name', 'name'),
+      fetchAllRows<PartOption>('spare_parts', 'id, code, name, unit, category, location, current_stock', 'name'),
     ]);
 
     const requesterRows = (users as Profile[]) ?? [];
-    const supplierRows = (sups as { id: string; code: string; name: string }[]) ?? [];
+    const supplierRows = sups;
     setRows((req as unknown as PurchaseRequirement[]) ?? []);
     setRequesters(requesterRows);
     setSuppliers(supplierRows);
-    setParts((sp as PartOption[]) ?? []);
+    setParts((allSp ?? []) as PartOption[]);
 
     if (!form.requester_id && requesterRows.length > 0) {
       setForm((f) => ({ ...f, requester_id: requesterRows[0].id }));

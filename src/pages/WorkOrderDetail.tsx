@@ -3,6 +3,7 @@ import { useEffect, useState, useCallback, useMemo } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import {
   supabase,
+  fetchAllRows,
   WO_SELECT,
   woTechnicians,
   STATUS_LABELS,
@@ -143,16 +144,16 @@ export default function WorkOrderDetail({
       .order('requested_at', { ascending: false });
     setRequests((reqData as unknown as PartRequest[]) ?? []);
 
-    const [{ data: techs }, { data: spvs }, { data: sp }, { data: grp }] = await Promise.all([
+    const [{ data: techs }, { data: spvs }, allSp, { data: grp }] = await Promise.all([
       supabase.from('profiles').select('*').eq('role', 'teknisi').eq('is_active', true).order('full_name'),
       supabase.from('profiles').select('*').in('role', ['spv', 'ss']).eq('is_active', true).order('full_name'),
-      supabase.from('spare_parts').select('*').order('name'),
+      fetchAllRows<SparePart>('spare_parts', '*', 'name'),
       supabase.from('inventory_groups').select('*').order('name'),
     ]);
     setGroups((grp as InventoryGroup[]) ?? []);
     setTechList((techs as Profile[]) ?? []);
     setSpvList((spvs as Profile[]) ?? []);
-    setSpareParts((sp as SparePart[]) ?? []);
+    setSpareParts((allSp ?? []) as SparePart[]);
     setAssignTechs(woTechnicians(woData as unknown as WorkOrder).map((t) => t.id));
     setAssignSpv(woData?.spv_id ?? '');
 

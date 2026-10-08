@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import {
   supabase,
+  fetchAllRows,
   stockStatus,
   type SparePart,
   type PartCategory,
@@ -9,7 +10,6 @@ import {
   type PartLocation,
 } from '@/lib/supabase';
 import { useDebouncedValue } from '@/lib/useDebouncedValue';
-import { buildIlikeOr } from '@/lib/search';
 import { Card, Badge, Button, Input, Select, Label, Modal, Textarea, Spinner, EmptyState } from '@/components/ui';
 import { Plus, Search, Pencil, Trash2, Package, AlertTriangle, TrendingUp, Sliders, ClipboardList, FileDown } from 'lucide-react';
 import { exportOpnamePdf, exportOpnameXls } from '@/lib/stockOpname';
@@ -73,15 +73,21 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
     // membongkar seluruh halaman (termasuk kolom pencarian) sehingga ketikan terputus-putus.
     const seq = ++reqSeq.current;
     setRefreshing(true);
-    let query = supabase.from('spare_parts').select('*').order('name');
+    // Ambil SEMUA spare part (melewati limit ~1000 baris/query), lalu saring di sisi klien
+    // sesuai kata kunci pencarian dan filter stok.
+    const all = await fetchAllRows<SparePart>('spare_parts', '*', 'name');
+    if (seq !== reqSeq.current) return; // sudah ada permintaan yang lebih baru; abaikan jawaban usang
+    let filtered = all;
 
     if (search) {
-      query = query.or(buildIlikeOr(['code', 'name', 'category'], search));
+      const s = search.toLowerCase();
+      filtered = filtered.filter(
+        (p) =>
+          p.name?.toLowerCase().includes(s) ||
+          p.code?.toLowerCase().includes(s) ||
+          (p.category ?? '').toLowerCase().includes(s)
+      );
     }
-
-    const { data } = await query;
-    if (seq !== reqSeq.current) return; // sudah ada permintaan yang lebih baru; abaikan jawaban usang
-    let filtered = (data as SparePart[]) ?? [];
 
     if (stockFilter === 'low') {
       filtered = filtered.filter((p) => stockStatus(p) === 'low');
@@ -238,9 +244,8 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
         list = parts;
         scopeLabel = `Sesuai tampilan layar${search ? ` (pencarian: "${search}")` : ''}`;
       } else {
-        const { data, error } = await supabase.from('spare_parts').select('*').order('name');
-        if (error) throw error;
-        list = (data as SparePart[]) ?? [];
+        const all = await fetchAllRows<SparePart>('spare_parts', '*', 'name');
+        list = all;
         scopeLabel = 'Semua spare part';
         if (opname.scope === 'location') {
           list = list.filter((p) => p.location === opname.value);

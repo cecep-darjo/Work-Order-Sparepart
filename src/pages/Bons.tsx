@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { supabase } from '@/lib/supabase';
+import { supabase, fetchAllRows } from '@/lib/supabase';
 import { Badge, Button, Card, EmptyState, Input, Label, Modal, Select, Spinner, Textarea } from '@/components/ui';
 import { SearchablePicker, matchesQuery } from '@/components/Pickers';
 import { BON_SELECT, BON_STATUS_COLORS, bonRemaining, bonStatusLabel, type Bon } from '@/lib/bons';
@@ -271,13 +271,13 @@ export default function Bons() {
   const load = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
-    const [{ data: b, error }, { data: sp }] = await Promise.all([
+    const [{ data: b, error }, allSp] = await Promise.all([
       supabase.from('spare_part_bons').select(BON_SELECT).order('created_at', { ascending: false }).limit(500),
-      supabase.from('spare_parts').select('id, code, name, unit, category, location, current_stock').order('name'),
+      fetchAllRows<PartOption>('spare_parts', 'id, code, name, unit, category, location, current_stock', 'name'),
     ]);
     if (error) setLoadError(error.message);
     setBons((b as unknown as Bon[]) ?? []);
-    setParts((sp as PartOption[]) ?? []);
+    setParts((allSp ?? []) as PartOption[]);
     setLoading(false);
   }, []);
 
