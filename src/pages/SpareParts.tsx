@@ -8,6 +8,7 @@ import {
   type PartCategory,
   type UnitOfMeasure,
   type PartLocation,
+  type InventoryGroup,
 } from '@/lib/supabase';
 import { useDebouncedValue } from '@/lib/useDebouncedValue';
 import { Card, Badge, Button, Input, Select, Label, Modal, Textarea, Spinner, EmptyState } from '@/components/ui';
@@ -15,6 +16,25 @@ import { Plus, Search, Pencil, Trash2, Package, AlertTriangle, TrendingUp, Slide
 import { exportOpnamePdf, exportOpnameXls } from '@/lib/stockOpname';
 
 type StockLevel = 'all' | 'low' | 'normal' | 'over';
+
+/**
+ * Pratinjau kode inventori 9 digit (xxyyyzzzz) tanpa nomor urut (zzzz masih = 0000
+ * karena nomor urut ditentukan di server berdasarkan urutan item dalam grup).
+ */
+function previewInventoryCode(name: string, group: InventoryGroup): string {
+  const xxyyy = group.use_abjad
+    ? (group.kode ?? '00').padStart(2, '0') + abjadValue(name)
+    : (group.kode ?? '').padStart(5, '0');
+  return xxyyy + '0000';
+}
+
+/** Urutan abjad huruf awal nama (a=001 ... z=026); selain huruf = 000. */
+function abjadValue(name: string): string {
+  const first = name.trim().charAt(0).toLowerCase();
+  const code = first.charCodeAt(0);
+  if (first >= 'a' && first <= 'z') return String(code - 96).padStart(3, '0');
+  return '000';
+}
 
 export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: boolean }) {
   const { profile } = useAuth();
@@ -33,6 +53,7 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
   const [categories, setCategories] = useState<PartCategory[]>([]);
   const [units, setUnits] = useState<UnitOfMeasure[]>([]);
   const [locations, setLocations] = useState<PartLocation[]>([]);
+  const [groups, setGroups] = useState<InventoryGroup[]>([]);
 
   // Stock Opname (lembar hitung PDF / Excel)
   const todayIso = () => {
@@ -57,6 +78,7 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
     min_stock: 0,
     max_stock: 0,
     location: '',
+    group_id: '',
   });
 
   const [txForm, setTxForm] = useState({
@@ -108,21 +130,23 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
 
   useEffect(() => {
     async function loadMasters() {
-      const [{ data: cat }, { data: un }, { data: loc }] = await Promise.all([
+      const [{ data: cat }, { data: un }, { data: loc }, { data: grp }] = await Promise.all([
         supabase.from('part_categories').select('*').order('name'),
         supabase.from('units_of_measure').select('*').order('name'),
         supabase.from('part_locations').select('*').order('name'),
+        supabase.from('inventory_groups').select('*').order('name'),
       ]);
       setCategories((cat as PartCategory[]) ?? []);
       setUnits((un as UnitOfMeasure[]) ?? []);
       setLocations((loc as PartLocation[]) ?? []);
+      setGroups((grp as InventoryGroup[]) ?? []);
     }
     loadMasters();
   }, []);
 
   function openCreate() {
     setEditing(null);
-    setForm({ code: '', name: '', category: '', unit: '', min_stock: 0, max_stock: 0, location: '' });
+    setForm({ code: '', name: '', category: '', unit: '', min_stock: 0, max_stock: 0, location: '', group_id: '' });
     setShowForm(true);
   }
 
@@ -136,6 +160,7 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
       min_stock: part.min_stock,
       max_stock: part.max_stock,
       location: part.location ?? '',
+      group_id: part.group_id != null ? String(part.group_id) : '',
     });
     setShowForm(true);
   }
@@ -159,6 +184,7 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
         min_stock: form.min_stock,
         max_stock: form.max_stock,
         location: form.location || null,
+        group_id: form.group_id ? Number(form.group_id) : null,
         updated_at: new Date().toISOString(),
       };
       const { error } = await supabase.from('spare_parts').update(data).eq('id', editing.id);
@@ -184,6 +210,7 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
         min_stock: form.min_stock,
         max_stock: form.max_stock,
         location: form.location || null,
+        group_id: form.group_id ? Number(form.group_id) : null,
       };
       const { error } = await supabase.from('spare_parts').insert(data);
       if (error) {
@@ -330,6 +357,9 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-semibold text-slate-900 text-sm">{part.name}</span>
                       <Badge className="bg-slate-100 text-slate-600 border-slate-200">{part.code}</Badge>
+                      {part.inventory_code && (
+                        <Badge className="bg-indigo-50 text-indigo-700 border-indigo-200 font-mono">{part.inventory_code}</Badge>
+                      )}
                     </div>
                     <div className="flex items-center gap-3 text-xs text-slate-400 mt-1 flex-wrap">
                       {part.category && <span>{part.category}</span>}
@@ -492,6 +522,34 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
           <div>
             <Label>Name *</Label>
             <Input value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder="Bearing 6204" />
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <Label>Inventory Group</Label>
+              <Select value={form.group_id} onChange={(e) => setForm((f) => ({ ...f, group_id: e.target.value }))}>
+                <option value="">None</option>
+                {groups.map((g) => (
+                  <option key={g.id} value={g.id}>{g.name}</option>
+                ))}
+              </Select>
+            </div>
+            <div>
+              <Label>Inventory Code</Label>
+              <Input
+                value={
+                  form.group_id && groups.some((g) => g.id === Number(form.group_id))
+                    ? previewInventoryCode(
+                        form.name,
+                        groups.find((g) => g.id === Number(form.group_id))!
+                      )
+                    : '—'
+                }
+                disabled
+                readOnly
+                className="bg-slate-50 text-slate-500"
+              />
+              <p className="text-xs text-slate-400 mt-1">Kode 9 digit dibuat otomatis dari grup & nama.</p>
+            </div>
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div>

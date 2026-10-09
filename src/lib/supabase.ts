@@ -25,9 +25,12 @@ export interface PartCategory {
 }
 
 export interface InventoryGroup {
-  id: string;
-  code: string;
+  id: number;
   name: string;
+  /** 2 digit (xx) saat use_abjad, atau 5 digit (xxyyy) saat use_abjad=false */
+  kode: string | null;
+  /** true = kode grup dipakai sebagai awalan + urutan abjad nama part; false = kode 5 digit manual */
+  use_abjad: boolean;
   created_at: string;
 }
 
@@ -97,7 +100,9 @@ export type SparePart = {
   max_stock: number;
   current_stock: number;
   location: string | null;
-  group_id?: string | null;
+  group_id?: number | null;
+  /** Kode inventori 9 digit (xxyyyzzzz) yang dihasilkan dari grup. */
+  inventory_code?: string | null;
   created_at: string;
   updated_at: string;
 };

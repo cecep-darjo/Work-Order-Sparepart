@@ -14,17 +14,18 @@ import {
   type UnitOfMeasure,
   type PartLocation,
   type InventorySupplier,
+  type InventoryGroup,
 } from '@/lib/supabase';
 import { normalizeUsername, validatePassword, validateUsername } from '@/lib/authUsername';
 import { Card, Badge, Button, Input, Select, Label, Modal, Spinner } from '@/components/ui';
-import { Building2, MapPin, Cpu, Users, Plus, Pencil, Trash2, Tag, Ruler, Warehouse, Hash } from 'lucide-react';
+import { Building2, MapPin, Cpu, Users, Plus, Pencil, Trash2, Tag, Ruler, Warehouse, Hash, FolderTree } from 'lucide-react';
 
-type Tab = 'departments' | 'areas' | 'equipment' | 'users' | 'categories' | 'units' | 'locations' | 'suppliers' | 'gr_numbers';
+type Tab = 'departments' | 'areas' | 'equipment' | 'users' | 'categories' | 'units' | 'locations' | 'suppliers' | 'gr_numbers' | 'groups';
 type MasterScope = 'wo' | 'inventory';
 type SimpleMaster = 'categories' | 'units' | 'locations' | 'suppliers';
 type GRKind = 'credit' | 'cash' | 'import';
 const WO_TABS: Tab[] = ['departments', 'areas', 'equipment', 'users'];
-const INVENTORY_TABS: Tab[] = ['categories', 'units', 'locations', 'suppliers', 'gr_numbers'];
+const INVENTORY_TABS: Tab[] = ['categories', 'units', 'locations', 'suppliers', 'gr_numbers', 'groups'];
 const SIMPLE_TABLE: Record<SimpleMaster, string> = {
   categories: 'part_categories',
   units: 'units_of_measure',
@@ -48,6 +49,7 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
   const [units, setUnits] = useState<UnitOfMeasure[]>([]);
   const [locations, setLocations] = useState<PartLocation[]>([]);
   const [suppliers, setSuppliers] = useState<InventorySupplier[]>([]);
+  const [groups, setGroups] = useState<InventoryGroup[]>([]);
   const [grForm, setGrForm] = useState<Record<GRKind, number>>({ credit: 1, cash: 1, import: 1 });
 
   const [showForm, setShowForm] = useState(false);
@@ -67,6 +69,7 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
     password: '',
   });
   const [simpleForm, setSimpleForm] = useState({ name: '', code: '' });
+  const [groupForm, setGroupForm] = useState({ name: '', kode: '', use_abjad: true });
 
   useEffect(() => {
     setTab(scope === 'wo' ? 'departments' : 'categories');
@@ -88,17 +91,19 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
       setEquipment((e as unknown as (Equipment & { area?: Area })[]) ?? []);
       setUsers((u as Profile[]) ?? []);
     } else {
-      const [{ data: cat }, { data: un }, { data: loc }, sup, { data: gr }] = await Promise.all([
+      const [{ data: cat }, { data: un }, { data: loc }, sup, { data: gr }, { data: groupsData }] = await Promise.all([
         supabase.from('part_categories').select('*').order('name'),
         supabase.from('units_of_measure').select('*').order('name'),
         supabase.from('part_locations').select('*').order('name'),
         fetchAllRows<InventorySupplier>('inventory_suppliers', '*', 'name'),
         supabase.rpc('get_gr_start_numbers'),
+        supabase.from('inventory_groups').select('*').order('name'),
       ]);
       setCategories((cat as PartCategory[]) ?? []);
       setUnits((un as UnitOfMeasure[]) ?? []);
       setLocations((loc as PartLocation[]) ?? []);
       setSuppliers(sup);
+      setGroups((groupsData as InventoryGroup[]) ?? []);
 
       const next: Record<GRKind, number> = { credit: 1, cash: 1, import: 1 };
       ((gr as { gr_kind: GRKind; start_no: number }[] | null) ?? []).forEach((r) => {
@@ -118,6 +123,7 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
     if (type === 'equipment') setEquipForm({ area_id: '', name: '', code: '' });
     if (type === 'users') setUserForm({ username: '', full_name: '', role: 'teknisi', department_id: '', password: '' });
     if (isSimpleMaster(type)) setSimpleForm({ name: '', code: '' });
+    if (type === 'groups') setGroupForm({ name: '', kode: '', use_abjad: true });
     setEditing({ type });
     setShowForm(true);
   }
@@ -136,6 +142,13 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
       });
     }
     if (isSimpleMaster(type)) setSimpleForm({ name: data.name as string, code: data.code as string });
+    if (type === 'groups') {
+      setGroupForm({
+        name: data.name as string,
+        kode: (data.kode as string | null) ?? '',
+        use_abjad: (data.use_abjad as boolean) ?? true,
+      });
+    }
     setEditing({ type, id, data });
     setShowForm(true);
   }
@@ -233,6 +246,40 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
         setActing(false);
         return;
       }
+    } else if (editing.type === 'groups') {
+      // Validasi
+      if (!groupForm.name.trim()) {
+        alert('Nama grup wajib diisi.');
+        setActing(false);
+        return;
+      }
+      const kodeTrim = groupForm.kode.trim();
+      if (groupForm.use_abjad) {
+        if (!/^\d{2}$/.test(kodeTrim)) {
+          alert('Kode grup (xx) wajib berupa 2 digit angka, contoh: 10.');
+          setActing(false);
+          return;
+        }
+      } else {
+        if (!/^\d{5}$/.test(kodeTrim)) {
+          alert('Kode grup manual (xxyyy) wajib berupa 5 digit angka, contoh: 10020.');
+          setActing(false);
+          return;
+        }
+      }
+      const payload = {
+        name: groupForm.name.trim(),
+        kode: kodeTrim,
+        use_abjad: groupForm.use_abjad,
+      };
+      const { error } = editing.id
+        ? await supabase.from('inventory_groups').update(payload).eq('id', editing.id)
+        : await supabase.from('inventory_groups').insert(payload);
+      if (error) {
+        alert(error.message);
+        setActing(false);
+        return;
+      }
     }
 
     // Log activity
@@ -257,6 +304,7 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
     if (type === 'equipment') await supabase.from('equipment').delete().eq('id', id);
     if (type === 'users') await supabase.from('profiles').delete().eq('id', id);
     if (isSimpleMaster(type)) await supabase.from(SIMPLE_TABLE[type]).delete().eq('id', id);
+    if (type === 'groups') await supabase.from('inventory_groups').delete().eq('id', id);
     loadAll();
   }
 
@@ -306,6 +354,7 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
     { key: 'locations', label: 'Locations', icon: Warehouse },
     { key: 'suppliers', label: 'Suppliers', icon: Building2 },
     { key: 'gr_numbers', label: 'GR Numbering', icon: Hash },
+    { key: 'groups', label: 'Inventory Groups', icon: FolderTree },
   ];
   const visibleTabs = scope === 'wo'
     ? (profile?.role === 'ss' ? WO_TABS.filter((t) => t !== 'users') : WO_TABS)
@@ -468,7 +517,33 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
             </div>
           );
         })()}
-
+        {tab === 'groups' && (
+          <div className="space-y-2">
+            <p className="text-xs text-slate-400">
+              Grup inventori membentuk kode 9 digit (xxyyyzzzz) pada spare part: kode grup dipakai sebagai awalan,
+              urutan abjad nama part disisipkan, dan nomor urut item mengikuti.
+            </p>
+            {groups.map((g) => (
+              <div key={g.id} className="flex items-center justify-between p-3 rounded-lg bg-slate-50">
+                <div>
+                  <p className="text-sm font-medium text-slate-900">{g.name}</p>
+                  <p className="text-xs text-slate-400">
+                    {g.use_abjad ? `Kode xx: ${g.kode ?? '00'} (abjad)` : `Kode xxyyy manual: ${g.kode ?? ''}`}
+                  </p>
+                </div>
+                <div className="flex gap-1">
+                  <button onClick={() => openEdit('groups', String(g.id), g as unknown as Record<string, unknown>)} className="p-2 text-slate-500 hover:bg-slate-200 rounded-lg">
+                    <Pencil className="w-4 h-4" />
+                  </button>
+                  <button onClick={() => handleDelete('groups', String(g.id))} className="p-2 text-red-500 hover:bg-red-100 rounded-lg">
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            ))}
+            {groups.length === 0 && <p className="text-sm text-slate-400 py-4 text-center">Belum ada grup. Tambahkan grup untuk mengelompokkan spare part.</p>}
+          </div>
+        )}
         {tab === 'gr_numbers' && (
           <div className="space-y-4">
             <p className="text-sm text-slate-500">Nomor awal GR diatur terpisah untuk setiap jenis. Nomor GR berikutnya = nomor GR tersimpan tertinggi tahun ini + 1; nomor awal hanya berlaku jika lebih besar dari itu (mis. untuk melanjutkan dari dokumen kertas), jadi tidak akan menabrak nomor yang sudah ada.</p>
@@ -527,6 +602,42 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
                 <Label>Code *</Label>
                 <Input value={simpleForm.code} onChange={(e) => setSimpleForm((f) => ({ ...f, code: e.target.value.toUpperCase() }))} placeholder="BRG" />
                 <p className="text-xs text-slate-400 mt-1">Kode ini dipakai sebagai awalan nomor kode part otomatis.</p>
+              </div>
+            </>
+          )}
+
+          {editing?.type === 'groups' && (
+            <>
+              <div>
+                <Label>Nama Grup *</Label>
+                <Input value={groupForm.name} onChange={(e) => setGroupForm((f) => ({ ...f, name: e.target.value }))} placeholder="Pompa Sentrifugal" />
+              </div>
+              <div>
+                <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={groupForm.use_abjad}
+                    onChange={(e) => setGroupForm((f) => ({ ...f, use_abjad: e.target.checked }))}
+                    className="w-4 h-4 rounded border-slate-300"
+                  />
+                  Gunakan urutan abjad nama part (xx + yyy abjad)
+                </label>
+                <p className="text-xs text-slate-400 mt-1">
+                  {groupForm.use_abjad
+                    ? 'Tikam kode xx (2 digit). Bagian yyy diisi otomatis dari huruf awal nama part.'
+                    : 'Tikam kode xxyyy manual (5 digit). Bagian yyy tidak otomatis.'}
+                </p>
+              </div>
+              <div>
+                <Label>{groupForm.use_abjad ? 'Kode Grup (xx) *' : 'Kode Grup Manual (xxyyy) *'}</Label>
+                <Input
+                  value={groupForm.kode}
+                  onChange={(e) => setGroupForm((f) => ({ ...f, kode: e.target.value.replace(/\D/g, '') }))}
+                  placeholder={groupForm.use_abjad ? '10' : '10020'}
+                  maxLength={groupForm.use_abjad ? 2 : 5}
+                  inputMode="numeric"
+                  required // Add required attribute here
+                />
               </div>
             </>
           )}
