@@ -25,7 +25,8 @@ export interface PartCategory {
 }
 
 export interface InventoryGroup {
-  id: number;
+  /** uuid (di database live, inventory_groups.id bertipe uuid) */
+  id: string;
   name: string;
   /** 2 digit (xx) saat use_abjad, atau 5 digit (xxyyy) saat use_abjad=false */
   kode: string | null;
@@ -100,7 +101,7 @@ export type SparePart = {
   max_stock: number;
   current_stock: number;
   location: string | null;
-  group_id?: number | null;
+  group_id?: string | null;
   /** Kode inventori 9 digit (xxyyyzzzz) yang dihasilkan dari grup. */
   inventory_code?: string | null;
   created_at: string;

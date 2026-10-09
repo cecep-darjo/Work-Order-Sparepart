@@ -184,12 +184,24 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
         min_stock: form.min_stock,
         max_stock: form.max_stock,
         location: form.location || null,
-        group_id: form.group_id ? Number(form.group_id) : null,
+        group_id: form.group_id || null,
         updated_at: new Date().toISOString(),
       };
-      const { error } = await supabase.from('spare_parts').update(data).eq('id', editing.id);
+      const { data: updated, error } = await supabase
+        .from('spare_parts')
+        .update(data)
+        .eq('id', editing.id)
+        .select('id, group_id, inventory_code');
       if (error) {
         alert('Gagal menyimpan: ' + error.message);
+        setActing(false);
+        return;
+      }
+      if (!updated || updated.length === 0) {
+        alert(
+          'Perubahan tidak tersimpan: tidak ada baris yang diperbarui. ' +
+            'Kemungkinan akun ini tidak punya izin mengubah spare part (RLS) atau data sudah tidak ada.'
+        );
         setActing(false);
         return;
       }
@@ -210,7 +222,7 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
         min_stock: form.min_stock,
         max_stock: form.max_stock,
         location: form.location || null,
-        group_id: form.group_id ? Number(form.group_id) : null,
+        group_id: form.group_id || null,
       };
       const { error } = await supabase.from('spare_parts').insert(data);
       if (error) {
@@ -537,10 +549,10 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
               <Label>Inventory Code</Label>
               <Input
                 value={
-                  form.group_id && groups.some((g) => g.id === Number(form.group_id))
+                  form.group_id && groups.some((g) => g.id === form.group_id)
                     ? previewInventoryCode(
                         form.name,
-                        groups.find((g) => g.id === Number(form.group_id))!
+                        groups.find((g) => g.id === form.group_id)!
                       )
                     : '—'
                 }

@@ -1,0 +1,30 @@
+diff --git a/src/pages/SpareParts.tsx b/src/pages/SpareParts.tsx
+index 1cb1d7c..705d003 100644
+--- a/src/pages/SpareParts.tsx
++++ b/src/pages/SpareParts.tsx
+@@ -187,12 +187,24 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
+         group_id: form.group_id ? Number(form.group_id) : null,
+         updated_at: new Date().toISOString(),
+       };
+-      const { error } = await supabase.from('spare_parts').update(data).eq('id', editing.id);
++      const { data: updated, error } = await supabase
++        .from('spare_parts')
++        .update(data)
++        .eq('id', editing.id)
++        .select('id, group_id, inventory_code');
+       if (error) {
+         alert('Gagal menyimpan: ' + error.message);
+         setActing(false);
+         return;
+       }
++      if (!updated || updated.length === 0) {
++        alert(
++          'Perubahan tidak tersimpan: tidak ada baris yang diperbarui. ' +
++            'Kemungkinan akun ini tidak punya izin mengubah spare part (RLS) atau data sudah tidak ada.'
++        );
++        setActing(false);
++        return;
++      }
+     } else {
+       // Kode part dibuat otomatis di server: <KODE_KATEGORI>-00001 (atau SP-00001 tanpa kategori).
+       const categoryId = categories.find((c) => c.name === form.category)?.id ?? null;
