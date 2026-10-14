@@ -1,0 +1,39 @@
+--- a/src/pages/SpareParts.tsx	2026-10-12 02:32:39.403062944 +0000
++++ b/src/pages/SpareParts.tsx	2026-10-12 02:32:39.408452329 +0000
+@@ -11,6 +11,7 @@
+   type InventoryGroup,
+ } from '@/lib/supabase';
+ import { useDebouncedValue } from '@/lib/useDebouncedValue';
++import { matchesQuery } from '@/components/Pickers';
+ import { Card, Badge, Button, Input, Select, Label, Modal, Textarea, Spinner, EmptyState } from '@/components/ui';
+ import { Plus, Search, Pencil, Trash2, Package, AlertTriangle, TrendingUp, Sliders, ClipboardList, FileDown } from 'lucide-react';
+ import { exportOpnamePdf, exportOpnameXls } from '@/lib/stockOpname';
+@@ -102,12 +103,13 @@
+     let filtered = all;
+ 
+     if (search) {
+-      const s = search.toLowerCase();
+-      filtered = filtered.filter(
+-        (p) =>
+-          p.name?.toLowerCase().includes(s) ||
+-          p.code?.toLowerCase().includes(s) ||
+-          (p.category ?? '').toLowerCase().includes(s)
++      // Metode sama dengan pemilih spare part di Purchase Requirement: semua kata yang diketik
++      // harus cocok (urutan bebas) pada gabungan nama, kode, kode inventori, kategori, dan lokasi.
++      filtered = filtered.filter((p) =>
++        matchesQuery(
++          [p.name, p.code, p.inventory_code, p.category, p.location].filter(Boolean).join(' '),
++          search
++        )
+       );
+     }
+ 
+@@ -318,7 +320,7 @@
+         <div className="relative flex-1">
+           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+           <Input
+-            placeholder="Search by code, name, or category..."
++            placeholder="Cari nama, kode, kode inventori, kategori, atau lokasi..."
+             value={searchInput}
+             onChange={(e) => setSearchInput(e.target.value)}
+             className="pl-10"

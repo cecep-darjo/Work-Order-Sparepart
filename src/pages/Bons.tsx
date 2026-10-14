@@ -3,6 +3,7 @@ import { useAuth } from '@/context/AuthContext';
 import { supabase, fetchAllRows } from '@/lib/supabase';
 import { Badge, Button, Card, EmptyState, Input, Label, Modal, Select, Spinner, Textarea } from '@/components/ui';
 import { SearchablePicker, matchesQuery } from '@/components/Pickers';
+import { groupNameMap, partPickerOption, type GroupInfo } from '@/lib/partOptions';
 import { BON_SELECT, BON_STATUS_COLORS, bonRemaining, bonStatusLabel, type Bon } from '@/lib/bons';
 import { Pencil, Plus, RefreshCw, Search, Trash2, XCircle } from 'lucide-react';
 
@@ -14,6 +15,8 @@ type PartOption = {
   category: string | null;
   location: string | null;
   current_stock: number;
+  inventory_code: string | null;
+  group_id: string | null;
 };
 
 function fmtDateTime(iso: string): string {
@@ -24,11 +27,13 @@ function fmtDateTime(iso: string): string {
 function BonFormModal({
   bon,
   parts,
+  groupNames,
   onClose,
   onSaved,
 }: {
   bon: Bon | null;
   parts: PartOption[];
+  groupNames: Record<string, string>;
   onClose: () => void;
   onSaved: (message: string) => void | Promise<void>;
 }) {
@@ -120,13 +125,7 @@ function BonFormModal({
                 onChange={(v) => { setItemPart(v); setItemQty(1); }}
                 placeholder="Cari & pilih spare part..."
                 emptyText="Spare part tidak ditemukan"
-                options={parts.map((p) => ({
-                  value: p.id,
-                  label: p.name,
-                  sublabel: [p.code, p.category, p.location].filter(Boolean).join(' • '),
-                  right: `${p.current_stock} ${p.unit}`,
-                  search: [p.name, p.code, p.category, p.location].filter(Boolean).join(' '),
-                }))}
+                options={parts.map((p) => partPickerOption(p, groupNames))}
               />
             </div>
             <div className="w-24">
@@ -262,6 +261,7 @@ export default function Bons() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [bons, setBons] = useState<Bon[]>([]);
   const [parts, setParts] = useState<PartOption[]>([]);
+  const [groupNames, setGroupNames] = useState<Record<string, string>>({});
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState('active');
   const [formBon, setFormBon] = useState<Bon | 'new' | null>(null);
@@ -271,13 +271,19 @@ export default function Bons() {
   const load = useCallback(async () => {
     setLoading(true);
     setLoadError(null);
-    const [{ data: b, error }, allSp] = await Promise.all([
+    const [{ data: b, error }, allSp, grps] = await Promise.all([
       supabase.from('spare_part_bons').select(BON_SELECT).order('created_at', { ascending: false }).limit(500),
-      fetchAllRows<PartOption>('spare_parts', 'id, code, name, unit, category, location, current_stock', 'name'),
+      fetchAllRows<PartOption>(
+        'spare_parts',
+        'id, code, name, unit, category, location, current_stock, inventory_code, group_id',
+        'name'
+      ),
+      fetchAllRows<GroupInfo>('inventory_groups', 'id, name', 'name'),
     ]);
     if (error) setLoadError(error.message);
     setBons((b as unknown as Bon[]) ?? []);
     setParts((allSp ?? []) as PartOption[]);
+    setGroupNames(groupNameMap(grps ?? []));
     setLoading(false);
   }, []);
 
@@ -427,6 +433,7 @@ export default function Bons() {
         <BonFormModal
           bon={formBon === 'new' ? null : formBon}
           parts={parts}
+          groupNames={groupNames}
           onClose={() => setFormBon(null)}
           onSaved={async (message) => {
             setFormBon(null);

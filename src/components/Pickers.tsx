@@ -29,6 +29,7 @@ export function SearchablePicker({
   onChange,
   placeholder = 'Cari...',
   emptyText = 'Tidak ada hasil',
+  searchPlaceholder = 'Ketik nama, kode, kategori, atau grup...',
   disabled = false,
   inline = false,
 }: {
@@ -37,6 +38,8 @@ export function SearchablePicker({
   onChange: (value: string) => void;
   placeholder?: string;
   emptyText?: string;
+  /** Teks petunjuk di kolom ketik saat daftar terbuka. */
+  searchPlaceholder?: string;
   disabled?: boolean;
   /** Daftar tampil di alur halaman (bukan popup) agar tidak terpotong di dalam Modal. */
   inline?: boolean;
@@ -132,7 +135,7 @@ export function SearchablePicker({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={onKeyDown}
-            placeholder="Ketik nama, kode, kategori, atau grup..."
+            placeholder={searchPlaceholder}
             className="w-full pl-10 pr-4 py-2.5 border border-blue-500 ring-2 ring-blue-500 rounded-lg text-sm focus:outline-none bg-white"
           />
         </div>

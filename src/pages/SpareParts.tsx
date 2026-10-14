@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import {
   supabase,
@@ -11,11 +11,23 @@ import {
   type InventoryGroup,
 } from '@/lib/supabase';
 import { useDebouncedValue } from '@/lib/useDebouncedValue';
+import { matchesQuery, SearchablePicker, type PickerOption } from '@/components/Pickers';
+import { groupNameMap } from '@/lib/partOptions';
 import { Card, Badge, Button, Input, Select, Label, Modal, Textarea, Spinner, EmptyState } from '@/components/ui';
-import { Plus, Search, Pencil, Trash2, Package, AlertTriangle, TrendingUp, Sliders, ClipboardList, FileDown } from 'lucide-react';
+import { Plus, Search, Pencil, Trash2, Package, AlertTriangle, TrendingUp, Sliders, ClipboardList, FileDown, ArrowUp, ArrowDown, ArrowUpDown } from 'lucide-react';
 import { exportOpnamePdf, exportOpnameXls } from '@/lib/stockOpname';
 
 type StockLevel = 'all' | 'low' | 'normal' | 'over';
+
+type SortKey = 'name' | 'code' | 'inventory_code' | 'category' | 'location' | 'current_stock';
+const SORT_OPTIONS: { key: SortKey; label: string }[] = [
+  { key: 'name', label: 'Nama' },
+  { key: 'code', label: 'Kode' },
+  { key: 'inventory_code', label: 'Kode Inventori' },
+  { key: 'category', label: 'Kategori' },
+  { key: 'location', label: 'Lokasi' },
+  { key: 'current_stock', label: 'Stok' },
+];
 
 /**
  * Pratinjau kode inventori 9 digit (xxyyyzzzz) tanpa nomor urut (zzzz masih = 0000
@@ -26,6 +38,24 @@ function previewInventoryCode(name: string, group: InventoryGroup): string {
     ? (group.kode ?? '00').padStart(2, '0') + abjadValue(name)
     : (group.kode ?? '').padStart(5, '0');
   return xxyyy + '0000';
+}
+
+/**
+ * Kode unik grup yang dipakai membentuk kode inventori: 2 digit (xx) bila grup memakai abjad,
+ * 5 digit (xxyyy) bila kode manual. Sama dengan yang dipakai trigger database (generate_inventory_code).
+ */
+function groupKode(group: InventoryGroup): string {
+  return group.use_abjad !== false
+    ? (group.kode ?? '').slice(0, 2).padStart(2, '0')
+    : (group.kode ?? '').padStart(5, '0');
+}
+
+/** Pesan gagal simpan yang jelas; kode inventori ganda ditolak database (unique index, migrasi 042). */
+function saveErrorText(error: { message: string; code?: string }): string {
+  if (error.code === '23505' && error.message.includes('uq_spare_parts_inventory_code')) {
+    return 'Kode inventori sudah dipakai spare part lain. Silakan simpan ulang; jika masih gagal, hubungi admin.';
+  }
+  return error.message;
 }
 
 /** Urutan abjad huruf awal nama (a=001 ... z=026); selain huruf = 000. */
@@ -45,7 +75,11 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
   const search = useDebouncedValue(searchInput.trim(), 300);
   const [refreshing, setRefreshing] = useState(false);
   const reqSeq = useRef(0);
+  // Nama grup per id (diisi saat master dimuat) agar nama grup ikut dicari di daftar.
+  const groupNamesRef = useRef<Record<string, string>>({});
   const [stockFilter, setStockFilter] = useState<StockLevel>(lowStockOnly ? 'low' : 'all');
+  const [sortKey, setSortKey] = useState<SortKey>('name');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<SparePart | null>(null);
   const [showTx, setShowTx] = useState<SparePart | null>(null);
@@ -102,12 +136,17 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
     let filtered = all;
 
     if (search) {
-      const s = search.toLowerCase();
-      filtered = filtered.filter(
-        (p) =>
-          p.name?.toLowerCase().includes(s) ||
-          p.code?.toLowerCase().includes(s) ||
-          (p.category ?? '').toLowerCase().includes(s)
+      // Metode sama dengan pemilih spare part di Purchase Requirement: semua kata yang diketik
+      // harus cocok (urutan bebas) pada gabungan nama, kode, kode inventori, Inventory Group,
+      // kategori, dan lokasi.
+      const groupNames = groupNamesRef.current;
+      filtered = filtered.filter((p) =>
+        matchesQuery(
+          [p.name, p.code, p.inventory_code, p.group_id ? groupNames[p.group_id] : '', p.category, p.location]
+            .filter(Boolean)
+            .join(' '),
+          search
+        )
       );
     }
 
@@ -140,6 +179,7 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
       setUnits((un as UnitOfMeasure[]) ?? []);
       setLocations((loc as PartLocation[]) ?? []);
       setGroups((grp as InventoryGroup[]) ?? []);
+      groupNamesRef.current = groupNameMap((grp as InventoryGroup[]) ?? []);
     }
     loadMasters();
   }, []);
@@ -193,7 +233,7 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
         .eq('id', editing.id)
         .select('id, group_id, inventory_code');
       if (error) {
-        alert('Gagal menyimpan: ' + error.message);
+        alert('Gagal menyimpan: ' + saveErrorText(error));
         setActing(false);
         return;
       }
@@ -226,7 +266,7 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
       };
       const { error } = await supabase.from('spare_parts').insert(data);
       if (error) {
-        alert('Gagal menyimpan: ' + error.message);
+        alert('Gagal menyimpan: ' + saveErrorText(error));
         setActing(false);
         return;
       }
@@ -280,7 +320,7 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
       let list: SparePart[];
       let scopeLabel: string;
       if (opname.scope === 'view') {
-        list = parts;
+        list = sortedParts;
         scopeLabel = `Sesuai tampilan layar${search ? ` (pencarian: "${search}")` : ''}`;
       } else {
         const all = await fetchAllRows<SparePart>('spare_parts', '*', 'name');
@@ -309,6 +349,61 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
     }
   }
 
+  // Pilihan Inventory Group: diurutkan menurut NOMOR KODE (bukan abjad nama); grup tanpa kode di
+  // paling bawah. Bisa dicari lewat kode maupun nama (kata bebas urutan).
+  const groupOptions = useMemo<PickerOption[]>(() => {
+    const byCode = (a: InventoryGroup, b: InventoryGroup) => {
+      if (!a.kode && b.kode) return 1;
+      if (a.kode && !b.kode) return -1;
+      // Kode 2 digit (xx) disejajarkan dengan kode 5 digit (xxyyy) menurut kode inventori 9 digit:
+      // 15 → 15000, sehingga urutannya 10250, 15, 15097, 21 (bukan semua 2 digit dulu).
+      const ka = groupKode(a);
+      const kb = groupKode(b);
+      return (
+        ka.padEnd(5, '0').localeCompare(kb.padEnd(5, '0'), undefined, { numeric: true }) ||
+        ka.length - kb.length ||
+        a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
+      );
+    };
+    return [...groups].sort(byCode).map((g) => {
+      const k = groupKode(g);
+      return {
+        value: g.id,
+        label: `${k} - ${g.name}`,
+        sublabel: g.use_abjad !== false ? 'Kode 2 digit + abjad nama part' : 'Kode 5 digit manual',
+        search: `${k} ${g.kode ?? ''} ${g.name}`,
+      };
+    });
+  }, [groups]);
+
+  // Klik header kolom: kolom sama membalik arah, kolom baru mulai dari naik.
+  function toggleSort(key: SortKey) {
+    if (key === sortKey) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    else {
+      setSortKey(key);
+      setSortDir('asc');
+    }
+  }
+
+  // Urutan tampilan. Nilai kosong selalu di paling bawah, apa pun arah urutannya.
+  const sortedParts = useMemo(() => {
+    const dir = sortDir === 'asc' ? 1 : -1;
+    return [...parts].sort((a, b) => {
+      if (sortKey === 'current_stock') {
+        return (Number(a.current_stock) - Number(b.current_stock)) * dir || a.name.localeCompare(b.name);
+      }
+      const av = (a[sortKey] ?? '').toString().trim();
+      const bv = (b[sortKey] ?? '').toString().trim();
+      if (!av && !bv) return a.name.localeCompare(b.name);
+      if (!av) return 1;
+      if (!bv) return -1;
+      return (
+        av.localeCompare(bv, undefined, { numeric: true, sensitivity: 'base' }) * dir ||
+        a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
+      );
+    });
+  }, [parts, sortKey, sortDir]);
+
   if (loading) return <Spinner />;
 
   return (
@@ -318,11 +413,29 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
           <Input
-            placeholder="Search by code, name, or category..."
+            placeholder="Cari nama, kode, kode inventori, grup, kategori, atau lokasi..."
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
             className="pl-10"
           />
+        </div>
+        <div className="flex gap-1 sm:w-auto">
+          <Select value={sortKey} onChange={(e) => setSortKey(e.target.value as SortKey)} className="sm:w-44" aria-label="Urutkan berdasarkan">
+            {SORT_OPTIONS.map((o) => (
+              <option key={o.key} value={o.key}>
+                Urutkan: {o.label}
+              </option>
+            ))}
+          </Select>
+          <button
+            type="button"
+            onClick={() => setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))}
+            className="px-3 border border-slate-300 rounded-lg bg-white text-slate-600 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            title={sortDir === 'asc' ? 'Naik (A-Z / terkecil) — klik untuk membalik' : 'Turun (Z-A / terbesar) — klik untuk membalik'}
+            aria-label="Balik arah urutan"
+          >
+            {sortDir === 'asc' ? <ArrowUp className="w-4 h-4" /> : <ArrowDown className="w-4 h-4" />}
+          </button>
         </div>
         {!lowStockOnly && (
           <Select value={stockFilter} onChange={(e) => setStockFilter(e.target.value as StockLevel)} className="sm:w-40">
@@ -359,70 +472,106 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
           <EmptyState message={lowStockOnly ? 'No low stock items - all levels are normal' : 'No spare parts found'} />
         </Card>
       ) : (
-        <div className={`grid gap-3 transition-opacity ${refreshing ? 'opacity-60' : ''}`}>
-          {parts.map((part) => {
-            const status = stockStatus(part);
-            return (
-              <Card key={part.id} className="p-4">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-semibold text-slate-900 text-sm">{part.name}</span>
-                      <Badge className="bg-slate-100 text-slate-600 border-slate-200">{part.code}</Badge>
-                      {part.inventory_code && (
-                        <Badge className="bg-indigo-50 text-indigo-700 border-indigo-200 font-mono">{part.inventory_code}</Badge>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-3 text-xs text-slate-400 mt-1 flex-wrap">
-                      {part.category && <span>{part.category}</span>}
-                      {part.location && <span>• {part.location}</span>}
-                    </div>
-                    <div className="flex items-center gap-4 mt-2 text-sm">
-                      <div>
-                        <span className="text-slate-400 text-xs">Current: </span>
-                        <span className={`font-bold ${status === 'low' ? 'text-orange-600' : status === 'over' ? 'text-blue-600' : 'text-slate-900'}`}>
-                          {part.current_stock} {part.unit}
-                        </span>
-                      </div>
-                      <span className="text-xs text-slate-400">Min: {part.min_stock} / Max: {part.max_stock}</span>
-                      <Badge
-                        className={
-                          status === 'low'
-                            ? 'bg-orange-100 text-orange-700 border-orange-200'
-                            : status === 'over'
-                            ? 'bg-blue-100 text-blue-700 border-blue-200'
-                            : 'bg-emerald-100 text-emerald-700 border-emerald-200'
-                        }
-                      >
-                        {status === 'low' ? 'Low Stock' : status === 'over' ? 'Over Stock' : 'Normal'}
-                      </Badge>
-                    </div>
-                  </div>
-                  {canManage && (
-                    <div className="flex gap-1 flex-shrink-0">
+        <Card className={`overflow-hidden transition-opacity ${refreshing ? 'opacity-60' : ''}`}>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-xs text-slate-500 uppercase">
+                <tr>
+                  {(
+                    [
+                      { key: 'name', label: 'Spare Part', align: 'left' },
+                      { key: 'code', label: 'Kode', align: 'left' },
+                      { key: 'inventory_code', label: 'Kode Inventori', align: 'left' },
+                      { key: 'category', label: 'Kategori', align: 'left' },
+                      { key: 'location', label: 'Lokasi', align: 'left' },
+                      { key: 'current_stock', label: 'Stok', align: 'right' },
+                    ] as { key: SortKey; label: string; align: 'left' | 'right' }[]
+                  ).map((col) => (
+                    <th key={col.key} className={`${col.align === 'right' ? 'text-right' : 'text-left'} px-4 py-3`}>
                       <button
-                        onClick={() => {
-                          setTxForm({ type: 'stock_in', quantity: 0, reference: '', notes: '' });
-                          setShowTx(part);
-                        }}
-                        className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg"
-                        title="Transaction"
+                        type="button"
+                        onClick={() => toggleSort(col.key)}
+                        className="inline-flex items-center gap-1 hover:text-slate-800 uppercase"
                       >
-                        <Sliders className="w-4 h-4" />
+                        {col.label} <SortIcon active={sortKey === col.key} dir={sortDir} />
                       </button>
-                      <button onClick={() => openEdit(part)} className="p-2 text-slate-500 hover:bg-slate-100 rounded-lg">
-                        <Pencil className="w-4 h-4" />
-                      </button>
-                      <button onClick={() => handleDelete(part.id)} className="p-2 text-red-500 hover:bg-red-50 rounded-lg">
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </Card>
-            );
-          })}
-        </div>
+                    </th>
+                  ))}
+                  <th className="text-right px-4 py-3">Min / Max</th>
+                  <th className="text-left px-4 py-3">Status</th>
+                  {canManage && <th className="text-right px-4 py-3">Aksi</th>}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {sortedParts.map((part) => {
+                  const status = stockStatus(part);
+                  return (
+                    <tr key={part.id} className="hover:bg-slate-50/60 align-top">
+                      <td className="px-4 py-3 font-semibold text-slate-900 min-w-[12rem]">{part.name}</td>
+                      <td className="px-4 py-3">
+                        <Badge className="bg-slate-100 text-slate-600 border-slate-200">{part.code}</Badge>
+                      </td>
+                      <td className="px-4 py-3">
+                        {part.inventory_code ? (
+                          <Badge className="bg-indigo-50 text-indigo-700 border-indigo-200 font-mono">{part.inventory_code}</Badge>
+                        ) : (
+                          <span className="text-slate-300">-</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-slate-600">{part.category || <span className="text-slate-300">-</span>}</td>
+                      <td className="px-4 py-3 text-slate-600">{part.location || <span className="text-slate-300">-</span>}</td>
+                      <td
+                        className={`px-4 py-3 text-right font-bold whitespace-nowrap ${
+                          status === 'low' ? 'text-orange-600' : status === 'over' ? 'text-blue-600' : 'text-slate-900'
+                        }`}
+                      >
+                        {part.current_stock} {part.unit}
+                      </td>
+                      <td className="px-4 py-3 text-right text-xs text-slate-400 whitespace-nowrap">
+                        {part.min_stock} / {part.max_stock}
+                      </td>
+                      <td className="px-4 py-3">
+                        <Badge
+                          className={
+                            status === 'low'
+                              ? 'bg-orange-100 text-orange-700 border-orange-200'
+                              : status === 'over'
+                              ? 'bg-blue-100 text-blue-700 border-blue-200'
+                              : 'bg-emerald-100 text-emerald-700 border-emerald-200'
+                          }
+                        >
+                          {status === 'low' ? 'Low Stock' : status === 'over' ? 'Over Stock' : 'Normal'}
+                        </Badge>
+                      </td>
+                      {canManage && (
+                        <td className="px-4 py-3">
+                          <div className="flex gap-1 justify-end">
+                            <button
+                              onClick={() => {
+                                setTxForm({ type: 'stock_in', quantity: 0, reference: '', notes: '' });
+                                setShowTx(part);
+                              }}
+                              className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg"
+                              title="Transaction"
+                            >
+                              <Sliders className="w-4 h-4" />
+                            </button>
+                            <button onClick={() => openEdit(part)} className="p-2 text-slate-500 hover:bg-slate-100 rounded-lg" title="Edit">
+                              <Pencil className="w-4 h-4" />
+                            </button>
+                            <button onClick={() => handleDelete(part.id)} className="p-2 text-red-500 hover:bg-red-50 rounded-lg" title="Hapus">
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </td>
+                      )}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </Card>
       )}
 
       {/* Stock Opname Modal */}
@@ -538,12 +687,24 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
           <div className="grid grid-cols-2 gap-4">
             <div>
               <Label>Inventory Group</Label>
-              <Select value={form.group_id} onChange={(e) => setForm((f) => ({ ...f, group_id: e.target.value }))}>
-                <option value="">None</option>
-                {groups.map((g) => (
-                  <option key={g.id} value={g.id}>{g.name}</option>
-                ))}
-              </Select>
+              <SearchablePicker
+                inline
+                value={form.group_id}
+                onChange={(v) => setForm((f) => ({ ...f, group_id: v }))}
+                placeholder="None — cari & pilih grup..."
+                searchPlaceholder="Ketik kode atau nama grup..."
+                emptyText="Grup tidak ditemukan. Tambahkan dulu di Master Data Inventory."
+                options={groupOptions}
+              />
+              {form.group_id && groups.some((g) => g.id === form.group_id) && (
+                <p className="text-xs text-slate-400 mt-1">
+                  {(() => {
+                    const g = groups.find((x) => x.id === form.group_id)!;
+                    const k = groupKode(g);
+                    return `Kode grup: ${k} (${k.length} digit)`;
+                  })()}
+                </p>
+              )}
             </div>
             <div>
               <Label>Inventory Code</Label>
@@ -597,6 +758,7 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
             <div>
               <Label>Min Stock</Label>
               <Input type="number" min={0} value={form.min_stock} onChange={(e) => setForm((f) => ({ ...f, min_stock: Number(e.target.value) }))} />
+              <p className="text-xs text-slate-400 mt-1">Isi 0 bila part tidak perlu distok (tidak ada alert Low Stock).</p>
             </div>
             <div>
               <Label>Max Stock</Label>
@@ -657,6 +819,12 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
       </Modal>
     </div>
   );
+}
+
+/** Ikon urutan (sort) di header kolom tabel (sama dengan tabel Inventory Transactions). */
+function SortIcon({ active, dir }: { active: boolean; dir: 'asc' | 'desc' }) {
+  if (!active) return <ArrowUpDown className="w-3.5 h-3.5 text-slate-300" />;
+  return dir === 'asc' ? <ArrowUp className="w-3.5 h-3.5" /> : <ArrowDown className="w-3.5 h-3.5" />;
 }
 
 function StockStatCard({ icon: Icon, label, value, color }: { icon: typeof Package; label: string; value: number; color: 'orange' | 'emerald' | 'blue' }) {

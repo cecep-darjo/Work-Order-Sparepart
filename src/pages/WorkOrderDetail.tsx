@@ -25,6 +25,7 @@ import {
 } from '@/lib/supabase';
 import { Card, Badge, Button, Select, Textarea, Label, Spinner, Modal, Input } from '@/components/ui';
 import { MultiPicker, SearchablePicker } from '@/components/Pickers';
+import { groupNameMap, partPickerOption } from '@/lib/partOptions';
 import { PartRequestCard } from '@/components/PartRequests';
 import { PR_SELECT, type PartRequest } from '@/lib/partRequests';
 import { downloadWoCompletionReport } from '@/lib/woReportPdf';
@@ -672,14 +673,8 @@ export default function WorkOrderDetail({
     [...techList, ...assignedTechs.filter((a) => !techList.some((t) => t.id === a.id))]
   ).map((t) => ({ value: t.id, label: t.full_name, sublabel: t.username ? `@${t.username}` : undefined }));
   const groupName = (p: SparePart) => groups.find((g) => g.id === p.group_id)?.name ?? '';
-  const partOptions = spareParts.map((p) => ({
-    value: p.id,
-    label: p.name,
-    sublabel: [p.code, groupName(p), p.category, p.location].filter(Boolean).join(' • '),
-    right: p.current_stock <= 0 ? 'Stok habis' : `${p.current_stock} ${p.unit}`,
-    search: [p.name, p.code, p.category, groupName(p), p.location].filter(Boolean).join(' '),
-    disabled: p.current_stock <= 0,
-  }));
+  const groupNames = groupNameMap(groups);
+  const partOptions = spareParts.map((p) => partPickerOption(p, groupNames, { forIssue: true }));
   const chosenPart = spareParts.find((p) => p.id === selectedPart);
 
   return (

@@ -13,6 +13,7 @@ import {
 } from '@/lib/supabase';
 import { Card, Badge, Button, Select, Input, Label, Modal, Textarea, Spinner, EmptyState } from '@/components/ui';
 import { SearchablePicker, type PickerOption } from '@/components/Pickers';
+import { groupNameMap, partPickerOption, type GroupInfo } from '@/lib/partOptions';
 import EditTransactionModal from '@/components/EditTransactionModal';
 import { BON_SELECT, bonRemaining, type Bon, type BonItem } from '@/lib/bons';
 import { printIssueSlipByNo, printLegacyIssue } from '@/lib/manualIssue';
@@ -76,6 +77,7 @@ export default function Transactions() {
   const [loading, setLoading] = useState(true);
   const [allTransactions, setAllTransactions] = useState<InventoryTransaction[]>([]);
   const [parts, setParts] = useState<SparePart[]>([]);
+  const [groupNames, setGroupNames] = useState<Record<string, string>>({});
   // Input langsung berubah; penyaringan memakai nilai tertunda (debounce) dan dilakukan di klien.
   const [searchInput, setSearchInput] = useState('');
   const search = useDebouncedValue(searchInput.trim(), 250);
@@ -120,19 +122,28 @@ export default function Transactions() {
 
   // Data hanya diambil saat halaman dibuka / setelah transaksi (bukan pada tiap ketikan atau ganti filter).
   const load = useCallback(async () => {
-    const [allSp, { data }] = await Promise.all([
+    const [allSp, grps, { data }] = await Promise.all([
       fetchAllRows<SparePart>('spare_parts', '*', 'name'),
+      fetchAllRows<GroupInfo>('inventory_groups', 'id, name', 'name'),
       supabase
         .from('inventory_transactions')
         .select('*, spare_part:spare_parts(*)')
         .order('created_at', { ascending: false }),
     ]);
     setParts(allSp ?? []);
+    setGroupNames(groupNameMap(grps ?? []));
     setAllTransactions((data as unknown as InventoryTransaction[]) ?? []);
     setLoading(false);
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  // Opsi pemilih spare part (format seragam di semua halaman): di bawah nama tampil Inventory Group.
+  const partOptions = useMemo<PickerOption[]>(() => parts.map((p) => partPickerOption(p, groupNames)), [parts, groupNames]);
+  const issuePartOptions = useMemo<PickerOption[]>(
+    () => parts.map((p) => partPickerOption(p, groupNames, { forIssue: true })),
+    [parts, groupNames]
+  );
 
   const transactions = useMemo(() => {
     let txns = allTransactions;
@@ -593,10 +604,16 @@ export default function Transactions() {
           <option value="adjustment">Adjustment</option>
           <option value="opname">Stock Opname</option>
         </Select>
-        <Select value={partFilter} onChange={(e) => setPartFilter(e.target.value)} className="sm:w-64">
-          <option value="all">Semua Spare Part</option>
-          {parts.map((p) => <option key={p.id} value={p.id}>{p.code} - {p.name}</option>)}
-        </Select>
+        <div className="sm:w-72">
+          <SearchablePicker
+            value={partFilter === 'all' ? '' : partFilter}
+            onChange={(v) => setPartFilter(v || 'all')}
+            placeholder="Semua Spare Part (ketik untuk cari)"
+            searchPlaceholder="Ketik nama, kode, atau grup..."
+            emptyText="Spare part tidak ditemukan"
+            options={partOptions}
+          />
+        </div>
         <Button variant="secondary" onClick={load}><RefreshCw className="w-4 h-4" /> Refresh</Button>
       </div>
 
@@ -844,13 +861,7 @@ export default function Transactions() {
                   onChange={(v) => { setReceiptPart(v); setReceiptQty(1); }}
                   placeholder="Cari & pilih spare part..."
                   emptyText="Spare part tidak ditemukan"
-                  options={parts.map((p) => ({
-                    value: p.id,
-                    label: p.name,
-                    sublabel: [p.code, p.category, p.location].filter(Boolean).join(' • '),
-                    right: `${p.current_stock} ${p.unit}`,
-                    search: [p.name, p.code, p.category, p.location].filter(Boolean).join(' '),
-                  }))}
+                  options={partOptions}
                 />
               </div>
               <div className="w-24">
@@ -1038,14 +1049,7 @@ export default function Transactions() {
                   onChange={(v) => { setIssuePart(v); setIssueQty(1); }}
                   placeholder="Cari & pilih spare part..."
                   emptyText="Spare part tidak ditemukan"
-                  options={parts.map((p) => ({
-                    value: p.id,
-                    label: p.name,
-                    sublabel: [p.code, p.category, p.location].filter(Boolean).join(' • '),
-                    right: p.current_stock <= 0 ? 'Stok habis' : `${p.current_stock} ${p.unit}`,
-                    search: [p.name, p.code, p.category, p.location].filter(Boolean).join(' '),
-                    disabled: p.current_stock <= 0,
-                  }))}
+                  options={issuePartOptions}
                 />
               </div>
               <div className="w-24">

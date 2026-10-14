@@ -3,7 +3,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { supabase, fetchAllRows, type Profile } from '@/lib/supabase';
 import { Badge, Button, Card, Input, Label, Modal, Select, Spinner, Textarea } from '@/components/ui';
-import { SearchablePicker } from '@/components/Pickers';
+import { SearchablePicker, type PickerOption } from '@/components/Pickers';
+import { groupNameMap, partPickerOption, type GroupInfo } from '@/lib/partOptions';
 import type { PageKey } from '@/components/Layout';
 import { ClipboardCheck, Paperclip, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-react';
 
@@ -26,6 +27,8 @@ type PartOption = {
   category: string | null;
   location: string | null;
   current_stock: number;
+  inventory_code: string | null;
+  group_id: string | null;
 };
 
 type PurchaseRequirement = {
@@ -49,6 +52,11 @@ type PurchaseRequirement = {
 };
 
 type NumberingDraft = { sap_no: string; pr_no: string };
+
+/** Opsi pemilih supplier: nama sebagai teks utama, kode sebagai teks kecil; keduanya bisa dicari. */
+function supplierPickerOptions(list: { id: string; code: string; name: string }[]): PickerOption[] {
+  return list.map((s) => ({ value: s.id, label: s.name, sublabel: s.code, search: `${s.name} ${s.code}` }));
+}
 
 const PR_SELECT =
   'id, requester_id, machine_name, supplier_id, sap_no, pr_no, attachment_files, status, created_by, created_at, numbered_by, numbered_at, requester:profiles!requester_id(full_name), supplier:inventory_suppliers(id, code, name), creator:profiles!created_by(full_name), numberer:profiles!numbered_by(full_name), items:purchase_requirement_items(id, spare_part_id, spare_part_name, quantity, received_qty, spare_part:spare_parts(code, unit))';
@@ -309,6 +317,7 @@ export function PurchaseRequirementsInbox({
 function EditPrModal({
   row,
   parts,
+  partOptions,
   requesters,
   suppliers,
   canEditNumbers,
@@ -317,6 +326,7 @@ function EditPrModal({
 }: {
   row: PurchaseRequirement;
   parts: PartOption[];
+  partOptions: PickerOption[];
   requesters: Profile[];
   suppliers: { id: string; code: string; name: string }[];
   canEditNumbers: boolean;
@@ -497,11 +507,16 @@ function EditPrModal({
           </div>
           <div>
             <Label>Supplier *</Label>
-            <Select value={form.supplier_id} onChange={(e) => setForm((f) => ({ ...f, supplier_id: e.target.value }))} disabled={supplierLocked}>
-              {suppliers.map((s) => (
-                <option key={s.id} value={s.id}>{s.code} - {s.name}</option>
-              ))}
-            </Select>
+            <SearchablePicker
+              inline
+              value={form.supplier_id}
+              onChange={(v) => setForm((f) => ({ ...f, supplier_id: v }))}
+              disabled={supplierLocked}
+              placeholder="Cari & pilih supplier..."
+              searchPlaceholder="Ketik nama atau kode supplier..."
+              emptyText="Supplier tidak ditemukan. Tambahkan dulu di Master Data Inventory."
+              options={supplierPickerOptions(suppliers)}
+            />
             {supplierLocked && <p className="text-xs text-slate-400 mt-1">Supplier terkunci karena sudah ada penerimaan barang.</p>}
           </div>
           <div className="sm:col-span-2">
@@ -520,13 +535,7 @@ function EditPrModal({
                 onChange={(v) => { setItemPart(v); setItemQty(1); }}
                 placeholder="Cari & pilih spare part..."
                 emptyText="Spare part tidak ditemukan di master."
-                options={parts.map((p) => ({
-                  value: p.id,
-                  label: p.name,
-                  sublabel: [p.code, p.category, p.location].filter(Boolean).join(' • '),
-                  right: `${p.current_stock} ${p.unit}`,
-                  search: [p.name, p.code, p.category, p.location].filter(Boolean).join(' '),
-                }))}
+                options={partOptions}
               />
             </div>
             <div className="w-24">
@@ -692,9 +701,16 @@ export default function PurchaseRequirements() {
     supplier_id: '',
   });
   const [parts, setParts] = useState<PartOption[]>([]);
+  const [groupNames, setGroupNames] = useState<Record<string, string>>({});
   const [items, setItems] = useState<{ spare_part_id: string; quantity: number }[]>([]);
   const [itemPart, setItemPart] = useState('');
   const [itemQty, setItemQty] = useState(1);
+
+  const supplierOptions = useMemo(() => supplierPickerOptions(suppliers), [suppliers]);
+
+  // Pilihan spare part (format seragam di semua halaman): di bawah nama tampil kode inventori •
+  // nama Inventory Group; kode part, kategori, dan lokasi tetap ikut dicari.
+  const partOptions = useMemo<PickerOption[]>(() => parts.map((p) => partPickerOption(p, groupNames)), [parts, groupNames]);
 
   const canCreate = profile?.role === 'admin' || profile?.role === 'ss';
   const canNumber = profile?.role === 'admin' || profile?.role === 'inventory';
@@ -732,11 +748,16 @@ export default function PurchaseRequirements() {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [{ data: req }, { data: users }, sups, allSp] = await Promise.all([
+    const [{ data: req }, { data: users }, sups, allSp, grps] = await Promise.all([
       supabase.from('purchase_requirements').select(PR_SELECT).order('created_at', { ascending: false }),
       supabase.from('profiles').select('*').eq('is_active', true).order('full_name'),
       fetchAllRows<{ id: string; code: string; name: string }>('inventory_suppliers', 'id, code, name', 'name'),
-      fetchAllRows<PartOption>('spare_parts', 'id, code, name, unit, category, location, current_stock', 'name'),
+      fetchAllRows<PartOption>(
+        'spare_parts',
+        'id, code, name, unit, category, location, current_stock, inventory_code, group_id',
+        'name'
+      ),
+      fetchAllRows<GroupInfo>('inventory_groups', 'id, name', 'name'),
     ]);
 
     const requesterRows = (users as Profile[]) ?? [];
@@ -745,16 +766,17 @@ export default function PurchaseRequirements() {
     setRequesters(requesterRows);
     setSuppliers(supplierRows);
     setParts((allSp ?? []) as PartOption[]);
+    setGroupNames(groupNameMap(grps ?? []));
 
-    if (!form.requester_id && requesterRows.length > 0) {
-      setForm((f) => ({ ...f, requester_id: requesterRows[0].id }));
-    }
-    if (!form.supplier_id && supplierRows.length > 0) {
-      setForm((f) => ({ ...f, supplier_id: supplierRows[0].id }));
-    }
+    // Nilai awal form. Supplier tidak ditebak: hanya dipilihkan otomatis bila cuma ada satu supplier.
+    setForm((f) => ({
+      ...f,
+      requester_id: f.requester_id || (requesterRows[0]?.id ?? ''),
+      supplier_id: f.supplier_id || (supplierRows.length === 1 ? supplierRows[0].id : ''),
+    }));
 
     setLoading(false);
-  }, [form.requester_id, form.supplier_id]);
+  }, []);
 
   useEffect(() => {
     load();
@@ -906,13 +928,7 @@ export default function PurchaseRequirements() {
                     onChange={(v) => { setItemPart(v); setItemQty(1); }}
                     placeholder="Cari & pilih spare part..."
                     emptyText="Spare part tidak ditemukan di master. Tambahkan dulu di menu Spare Parts."
-                    options={parts.map((p) => ({
-                      value: p.id,
-                      label: p.name,
-                      sublabel: [p.code, p.category, p.location].filter(Boolean).join(' • '),
-                      right: `${p.current_stock} ${p.unit}`,
-                      search: [p.name, p.code, p.category, p.location].filter(Boolean).join(' '),
-                    }))}
+                    options={partOptions}
                   />
                 </div>
                 <div className="w-24">
@@ -972,12 +988,15 @@ export default function PurchaseRequirements() {
             </div>
             <div>
               <Label>Supplier *</Label>
-              <Select value={form.supplier_id} onChange={(e) => setForm((f) => ({ ...f, supplier_id: e.target.value }))}>
-                <option value="">Pilih supplier...</option>
-                {suppliers.map((s) => (
-                  <option key={s.id} value={s.id}>{s.code} - {s.name}</option>
-                ))}
-              </Select>
+              <SearchablePicker
+                inline
+                value={form.supplier_id}
+                onChange={(v) => setForm((f) => ({ ...f, supplier_id: v }))}
+                placeholder="Cari & pilih supplier..."
+                searchPlaceholder="Ketik nama atau kode supplier..."
+                emptyText="Supplier tidak ditemukan. Tambahkan dulu di Master Data Inventory."
+                options={supplierOptions}
+              />
             </div>
             <div className="sm:col-span-2">
               <Label>Mesin (opsional)</Label>
@@ -1168,6 +1187,7 @@ export default function PurchaseRequirements() {
         <EditPrModal
           row={editingRow}
           parts={parts}
+          partOptions={partOptions}
           requesters={requesters}
           suppliers={suppliers}
           canEditNumbers={profile.role === 'admin'}

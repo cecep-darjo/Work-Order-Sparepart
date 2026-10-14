@@ -282,7 +282,10 @@ export const ROLE_LABELS: Record<Role, string> = {
 };
 
 export function stockStatus(part: SparePart): 'normal' | 'low' | 'over' {
-  if (part.current_stock <= part.min_stock) return 'low';
+  // Min stock 0 = part tidak perlu distok, jadi tidak pernah dianggap low stock (tanpa alert).
+  // Low stock hanya berlaku untuk part yang punya minimum > 0.
+  const min = Number(part.min_stock) || 0;
+  if (min > 0 && part.current_stock <= min) return 'low';
   if (part.max_stock > 0 && part.current_stock > part.max_stock) return 'over';
   return 'normal';
 }
@@ -324,11 +327,11 @@ export async function fetchAllRows<T>(
   let offset = 0;
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    const { data, error } = await supabase
-      .from(table)
-      .select(select)
-      .order(order, { ascending })
-      .range(offset, offset + chunk - 1);
+    let query = supabase.from(table).select(select).order(order, { ascending });
+    // Pembeda saat nilai urut sama (mis. dua spare part bernama sama) agar paging .range() stabil:
+    // tanpa ini baris di batas halaman bisa terlewat atau dobel.
+    if (order !== 'id') query = query.order('id', { ascending: true });
+    const { data, error } = await query.range(offset, offset + chunk - 1);
     if (error) return all; // gagal sebagian → kembali data yang sudah terkumpul
     const rows = (data as T[]) ?? [];
     all.push(...rows);

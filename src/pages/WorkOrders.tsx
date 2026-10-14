@@ -18,9 +18,9 @@ import {
   type Equipment,
 } from '@/lib/supabase';
 import { useDebouncedValue } from '@/lib/useDebouncedValue';
-import { buildIlikeOr } from '@/lib/search';
+import { matchesQuery } from '@/components/Pickers';
 import { Card, Badge, Button, Input, Select, Label, Modal, Textarea, Spinner, EmptyState } from '@/components/ui';
-import { BellRing, ClipboardCheck, Plus, Search } from 'lucide-react';
+import { ArrowDown, ArrowUp, BellRing, ClipboardCheck, Plus, Search } from 'lucide-react';
 import {
   WO_ACTION_META,
   fetchPartRequestCounts,
@@ -28,6 +28,42 @@ import {
   type WoActionKind,
   type WoPartRequestCounts,
 } from '@/lib/actionItems';
+
+type SortKey = 'created_at' | 'updated_at' | 'wo_number' | 'status' | 'priority' | 'department';
+const SORT_OPTIONS: { key: SortKey; label: string }[] = [
+  { key: 'created_at', label: 'Tanggal Dibuat' },
+  { key: 'updated_at', label: 'Terakhir Diperbarui' },
+  { key: 'wo_number', label: 'No. WO' },
+  { key: 'status', label: 'Status' },
+  { key: 'priority', label: 'Prioritas' },
+  { key: 'department', label: 'Departemen' },
+];
+// Urutan alur kerja WO (untuk sort Status) dan peringkat prioritas (urgent lebih dulu saat "naik").
+const STATUS_ORDER: WOStatus[] = ['new', 'assigned', 'analysis', 'on_progress', 'pending', 'done', 'verified', 'closed', 'canceled'];
+const PRIORITY_RANK: Record<string, number> = { urgent: 0, standard: 1 };
+
+/**
+ * Ambil SEMUA work order yang boleh dilihat user (RLS tetap berlaku), melewati batas ±1.000
+ * baris/query PostgREST dengan pagination `.range()`. Urutan memakai created_at lalu id agar
+ * pagination stabil (created_at kembar tidak membuat baris terlewat/ganda).
+ */
+async function fetchAllWorkOrders(): Promise<{ rows: WorkOrder[]; error: string | null }> {
+  const chunk = 1000;
+  const all: WorkOrder[] = [];
+  for (let offset = 0; ; offset += chunk) {
+    const { data, error } = await supabase
+      .from('work_orders')
+      .select(WO_SELECT)
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
+      .range(offset, offset + chunk - 1);
+    if (error) return { rows: all, error: error.message };
+    const rows = (data as unknown as WorkOrder[]) ?? [];
+    all.push(...rows);
+    if (rows.length < chunk) break;
+  }
+  return { rows: all, error: null };
+}
 
 export default function WorkOrders({
   onSelectWO,
@@ -39,10 +75,19 @@ export default function WorkOrders({
   const [workOrders, setWorkOrders] = useState<WorkOrder[]>([]);
   // Teks di kolom pencarian langsung berubah; query ke server memakai nilai yang sudah ditunda (debounce).
   const [searchInput, setSearchInput] = useState('');
-  const search = useDebouncedValue(searchInput.trim(), 300);
+  const search = useDebouncedValue(searchInput.trim(), 250);
   const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const reqSeq = useRef(0);
   const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [priorityFilter, setPriorityFilter] = useState<string>('all');
+  const [typeFilter, setTypeFilter] = useState<string>('all');
+  const [deptFilter, setDeptFilter] = useState<string>('all');
+  const [createdFrom, setCreatedFrom] = useState('');
+  const [createdTo, setCreatedTo] = useState('');
+  // Default: tanggal dibuat, terbaru dulu.
+  const [sortKey, setSortKey] = useState<SortKey>('created_at');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [showCreate, setShowCreate] = useState(false);
 
   // Create form state
@@ -72,44 +117,26 @@ export default function WorkOrders({
 
   const loadWorkOrders = useCallback(async () => {
     if (!profile) return;
-    // Hanya pemuatan pertama yang menampilkan spinner layar penuh. Spinner pada setiap pencarian
-    // membongkar seluruh halaman (termasuk kolom pencarian) sehingga ketikan terputus-putus.
+    // Hanya pemuatan pertama yang menampilkan spinner layar penuh. Pencarian, filter, dan urutan
+    // dikerjakan di sisi klien dari data yang sudah dimuat, jadi tidak ada query per ketikan.
     const seq = ++reqSeq.current;
     setRefreshing(true);
 
-    let query = supabase
-      .from('work_orders')
-      .select(WO_SELECT)
-      .order('created_at', { ascending: false });
-
-    // SPV: filter tambahan hanya saat "PIC Saya". Pada "Semua Departemen" tidak ada filter tambahan
-    // karena RLS (migration 033) kini mengizinkan SPV membaca semua WO lintas departemen.
-    if (profile.role === 'spv' && onlyMine) {
-      query = query.eq('spv_id', profile.id);
-    }
-    // Teknisi: RLS hanya mengembalikan WO tempat dia ditugaskan (termasuk penugasan bersama).
-
-    if (statusFilter !== 'all') {
-      query = query.eq('status', statusFilter);
-    }
-
-    if (search) {
-      query = query.or(buildIlikeOr(['wo_number', 'problem_description'], search));
-    }
-
-    const [{ data }, reqCounts, { data: pendingRows }] = await Promise.all([
-      query,
+    // SPV melihat semua WO lintas departemen (RLS migration 033); teknisi hanya WO yang ditugaskan.
+    const [{ rows, error }, reqCounts, { data: pendingRows }] = await Promise.all([
+      fetchAllWorkOrders(),
       fetchPartRequestCounts(profile),
       // RLS tetap berlaku: user hanya mendapat permintaan pada WO yang boleh ia lihat.
       supabase.from('wo_part_requests').select('work_order_id').eq('status', 'pending').limit(1000),
     ]);
     if (seq !== reqSeq.current) return; // sudah ada permintaan yang lebih baru; abaikan jawaban usang
-    setWorkOrders((data as unknown as WorkOrder[]) ?? []);
+    setWorkOrders(rows);
+    setLoadError(error);
     setPartReqs(reqCounts);
     setWaitingPartWo(new Set(((pendingRows as { work_order_id: string }[]) ?? []).map((r) => r.work_order_id)));
     setLoading(false);
     setRefreshing(false);
-  }, [profile, statusFilter, search, onlyMine]);
+  }, [profile]);
 
   useEffect(() => {
     loadWorkOrders();
@@ -224,11 +251,130 @@ export default function WorkOrders({
     return map;
   }, [workOrders, partReqs, profile]);
 
-  // WO yang butuh aksi tampil paling atas; urutan lain tetap (terbaru dulu).
+  // Teks pencarian tiap WO dihitung sekali per pemuatan data (bukan per ketikan).
+  // Mencakup: no. WO, deskripsi, departemen, area, mesin, peminta, PIC, teknisi, jenis kerja,
+  // prioritas, status, alasan pending/cancel, serta analisis/tindakan/hasil pengerjaan.
+  const haystacks = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const wo of workOrders) {
+      m.set(
+        wo.id,
+        [
+          wo.wo_number,
+          wo.problem_description,
+          wo.department?.name,
+          wo.department?.code,
+          wo.area?.name,
+          wo.equipment?.name,
+          wo.equipment?.code,
+          wo.requester_name,
+          wo.requester_department,
+          wo.spv?.full_name,
+          ...woTechnicians(wo).map((t) => t.full_name),
+          ...(wo.work_types ?? []).map((t) => WORK_TYPE_LABELS[t] ?? t),
+          PRIORITY_LABELS[wo.priority],
+          STATUS_LABELS[wo.status],
+          wo.pending_reason,
+          wo.cancel_reason,
+          wo.analysis,
+          wo.action_taken,
+          wo.result,
+        ]
+          .filter(Boolean)
+          .join(' ')
+      );
+    }
+    return m;
+  }, [workOrders]);
+
+  // Pilihan departemen diambil dari WO yang sudah dimuat (tanpa query tambahan).
+  const deptOptions = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const wo of workOrders) if (wo.department) m.set(wo.department.id, wo.department.name);
+    return [...m.entries()].sort((a, b) => a[1].localeCompare(b[1], undefined, { sensitivity: 'base' }));
+  }, [workOrders]);
+
+  // Semua filter KECUALI status; dipakai juga untuk hitungan per status di dropdown.
+  const baseFiltered = useMemo(() => {
+    const fromTs = createdFrom ? new Date(`${createdFrom}T00:00:00`).getTime() : null;
+    const toTs = createdTo ? new Date(`${createdTo}T23:59:59.999`).getTime() : null;
+    return workOrders.filter((wo) => {
+      if (profile?.role === 'spv' && onlyMine && wo.spv_id !== profile.id) return false;
+      if (onlyAction && !actionsByWo.has(wo.id)) return false;
+      if (priorityFilter !== 'all' && wo.priority !== priorityFilter) return false;
+      if (typeFilter !== 'all' && !(wo.work_types ?? []).includes(typeFilter)) return false;
+      if (deptFilter !== 'all' && wo.department_id !== deptFilter) return false;
+      if (fromTs !== null || toTs !== null) {
+        const ts = new Date(wo.created_at).getTime();
+        if (fromTs !== null && ts < fromTs) return false;
+        if (toTs !== null && ts > toTs) return false;
+      }
+      // Metode sama dengan pencarian spare part: semua kata harus cocok, urutan bebas.
+      if (search && !matchesQuery(haystacks.get(wo.id) ?? '', search)) return false;
+      return true;
+    });
+  }, [workOrders, haystacks, actionsByWo, profile, onlyMine, onlyAction, priorityFilter, typeFilter, deptFilter, createdFrom, createdTo, search]);
+
+  const statusCounts = useMemo(() => {
+    const c: Record<string, number> = {};
+    for (const wo of baseFiltered) c[wo.status] = (c[wo.status] ?? 0) + 1;
+    return c;
+  }, [baseFiltered]);
+
+  // Urutan tampilan. Pada urutan bawaan (Tanggal Dibuat, terbaru dulu) WO yang butuh aksi user
+  // tetap tampil paling atas; bila user memilih urutan lain, urutan mengikuti pilihan itu saja.
   const visibleWorkOrders = useMemo(() => {
-    const list = onlyAction ? workOrders.filter((w) => actionsByWo.has(w.id)) : workOrders;
-    return [...list].sort((a, b) => Number(actionsByWo.has(b.id)) - Number(actionsByWo.has(a.id)));
-  }, [workOrders, actionsByWo, onlyAction]);
+    const list = statusFilter === 'all' ? baseFiltered : baseFiltered.filter((w) => w.status === statusFilter);
+    const dir = sortDir === 'asc' ? 1 : -1;
+    const pinActions = sortKey === 'created_at' && sortDir === 'desc';
+    const time = (v: string | null | undefined) => (v ? new Date(v).getTime() : 0);
+    const text = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+    return [...list].sort((a, b) => {
+      if (pinActions) {
+        const pin = Number(actionsByWo.has(b.id)) - Number(actionsByWo.has(a.id));
+        if (pin !== 0) return pin;
+      }
+      let r = 0;
+      switch (sortKey) {
+        case 'created_at':
+          r = time(a.created_at) - time(b.created_at);
+          break;
+        case 'updated_at':
+          r = time(a.updated_at) - time(b.updated_at);
+          break;
+        case 'wo_number':
+          r = text(a.wo_number, b.wo_number);
+          break;
+        case 'status':
+          r = STATUS_ORDER.indexOf(a.status) - STATUS_ORDER.indexOf(b.status);
+          break;
+        case 'priority':
+          r = (PRIORITY_RANK[a.priority] ?? 9) - (PRIORITY_RANK[b.priority] ?? 9);
+          break;
+        case 'department':
+          r = text(a.department?.name ?? '', b.department?.name ?? '');
+          break;
+      }
+      // Seri: yang terbaru dibuat lebih dulu.
+      return r * dir || time(b.created_at) - time(a.created_at);
+    });
+  }, [baseFiltered, statusFilter, sortKey, sortDir, actionsByWo]);
+
+  const hasFilter = Boolean(
+    search || statusFilter !== 'all' || priorityFilter !== 'all' || typeFilter !== 'all' ||
+      deptFilter !== 'all' || createdFrom || createdTo || onlyAction
+  );
+
+  function resetFilters() {
+    setSearchInput('');
+    setStatusFilter('all');
+    setPriorityFilter('all');
+    setTypeFilter('all');
+    setDeptFilter('all');
+    setCreatedFrom('');
+    setCreatedTo('');
+    setOnlyAction(false);
+  }
 
   if (loading) return <Spinner />;
 
@@ -241,7 +387,7 @@ export default function WorkOrders({
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
           <Input
-            placeholder="Search WO number or description..."
+            placeholder="Cari no. WO, deskripsi, departemen, mesin, peminta, teknisi..."
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
             className="pl-10"
@@ -252,10 +398,10 @@ export default function WorkOrders({
           onChange={(e) => setStatusFilter(e.target.value)}
           className="sm:w-48"
         >
-          <option value="all">All Status</option>
+          <option value="all">All Status ({baseFiltered.length})</option>
           {(Object.keys(STATUS_LABELS) as WOStatus[]).map((s) => (
             <option key={s} value={s}>
-              {STATUS_LABELS[s]}
+              {STATUS_LABELS[s]} ({statusCounts[s] ?? 0})
             </option>
           ))}
         </Select>
@@ -278,10 +424,101 @@ export default function WorkOrders({
         )}
       </div>
 
+      {/* Filter lanjutan & urutan */}
+      <div className="grid grid-cols-2 lg:grid-cols-6 gap-2 items-end">
+        <div>
+          <Label>Prioritas</Label>
+          <Select value={priorityFilter} onChange={(e) => setPriorityFilter(e.target.value)}>
+            <option value="all">Semua</option>
+            {Object.keys(PRIORITY_LABELS).map((k) => (
+              <option key={k} value={k}>{PRIORITY_LABELS[k]}</option>
+            ))}
+          </Select>
+        </div>
+        <div>
+          <Label>Jenis Kerja</Label>
+          <Select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
+            <option value="all">Semua</option>
+            {WORK_TYPES.map((t) => (
+              <option key={t} value={t}>{WORK_TYPE_LABELS[t]}</option>
+            ))}
+          </Select>
+        </div>
+        <div>
+          <Label>Departemen</Label>
+          <Select value={deptFilter} onChange={(e) => setDeptFilter(e.target.value)}>
+            <option value="all">Semua</option>
+            {deptOptions.map(([id, name]) => (
+              <option key={id} value={id}>{name}</option>
+            ))}
+          </Select>
+        </div>
+        <div>
+          <Label>Dibuat dari</Label>
+          <Input type="date" value={createdFrom} max={createdTo || undefined} onChange={(e) => setCreatedFrom(e.target.value)} />
+        </div>
+        <div>
+          <Label>Dibuat sampai</Label>
+          <Input type="date" value={createdTo} min={createdFrom || undefined} onChange={(e) => setCreatedTo(e.target.value)} />
+        </div>
+        <div>
+          <Label>Urutkan</Label>
+          <div className="flex gap-1">
+            <Select value={sortKey} onChange={(e) => setSortKey(e.target.value as SortKey)} aria-label="Urutkan berdasarkan">
+              {SORT_OPTIONS.map((o) => (
+                <option key={o.key} value={o.key}>{o.label}</option>
+              ))}
+            </Select>
+            <button
+              type="button"
+              onClick={() => setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))}
+              className="px-3 border border-slate-300 rounded-lg bg-white text-slate-600 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              title={sortDir === 'asc' ? 'Naik (A-Z / terlama) — klik untuk membalik' : 'Turun (Z-A / terbaru) — klik untuk membalik'}
+              aria-label="Balik arah urutan"
+            >
+              {sortDir === 'asc' ? <ArrowUp className="w-4 h-4" /> : <ArrowDown className="w-4 h-4" />}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between gap-3 text-xs text-slate-500 flex-wrap">
+        <span>Menampilkan {visibleWorkOrders.length} dari {workOrders.length} WO</span>
+        <span className="flex items-center gap-3">
+          {hasFilter && (
+            <button type="button" className="text-blue-600 hover:text-blue-700 font-medium" onClick={resetFilters}>
+              Reset filter
+            </button>
+          )}
+          <button
+            type="button"
+            className="text-slate-500 hover:text-slate-800 font-medium disabled:opacity-50"
+            onClick={loadWorkOrders}
+            disabled={refreshing}
+          >
+            {refreshing ? 'Memuat...' : 'Muat ulang'}
+          </button>
+        </span>
+      </div>
+
+      {loadError && (
+        <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-lg px-4 py-3">
+          Sebagian data WO gagal dimuat ({loadError}). Daftar di bawah mungkin belum lengkap — coba "Muat ulang".
+        </div>
+      )}
+
       {/* List */}
       {visibleWorkOrders.length === 0 ? (
         <Card className="p-6">
-          <EmptyState message={onlyAction ? 'Tidak ada WO yang menunggu aksi Anda' : 'No work orders found'} />
+          <EmptyState
+            message={
+              workOrders.length === 0
+                ? 'No work orders found'
+                : onlyAction && !search && statusFilter === 'all'
+                ? 'Tidak ada WO yang menunggu aksi Anda'
+                : 'Tidak ada WO yang cocok dengan pencarian/filter'
+            }
+          />
         </Card>
       ) : (
         <div className={`grid gap-3 transition-opacity ${refreshing ? 'opacity-60' : ''}`}>
@@ -354,7 +591,9 @@ export default function WorkOrders({
                 </div>
                 <div className="flex items-center gap-4 text-xs text-slate-400 flex-wrap">
                   {wo.department && <span>{wo.department.name}</span>}
+                  {wo.area && <span>• {wo.area.name}</span>}
                   {wo.equipment && <span>• {wo.equipment.name}</span>}
+                  {wo.requester_name && <span>• Peminta: {wo.requester_name}</span>}
                   {profile?.role === 'spv' && (
                     <span>
                       • PIC: {wo.spv_id === profile.id ? <b className="text-blue-600">Anda</b> : (wo.spv?.full_name ?? '-')}

@@ -204,6 +204,30 @@ function woRows(rows: WoRow[]): ActionRow[] {
   return rows.map((w) => ({ id: w.id, title: w.wo_number, subtitle: w.problem_description, woId: w.id }));
 }
 
+/**
+ * Part yang dipantau untuk alert stok menipis: hanya yang punya stok minimum > 0
+ * (min 0 = tidak perlu distok, tidak pernah di-alert). Dimuat bertahap agar tidak terpotong
+ * batas ±1.000 baris/query; umumnya cukup satu query.
+ */
+async function fetchStockWatchlist(): Promise<{ data: unknown[] }> {
+  const chunk = 1000;
+  const all: unknown[] = [];
+  for (let offset = 0; ; offset += chunk) {
+    const { data, error } = await supabase
+      .from('spare_parts')
+      .select('id, code, name, unit, min_stock, max_stock, current_stock')
+      .gt('min_stock', 0)
+      .order('current_stock', { ascending: true })
+      .order('id', { ascending: true })
+      .range(offset, offset + chunk - 1);
+    if (error) break;
+    const rows = data ?? [];
+    all.push(...rows);
+    if (rows.length < chunk) break;
+  }
+  return { data: all };
+}
+
 async function buildGroups(profile: Profile): Promise<ActionGroup[]> {
   const role: Role = profile.role;
   const groups: ActionGroup[] = [];
@@ -257,13 +281,7 @@ async function buildGroups(profile: Profile): Promise<ActionGroup[]> {
         .order('created_at', { ascending: true })
         .limit(LIMIT)
     : Promise.resolve({ data: [] as unknown[] });
-  const stockPromise = staff
-    ? supabase
-        .from('spare_parts')
-        .select('id, code, name, unit, min_stock, max_stock, current_stock')
-        .order('current_stock', { ascending: true })
-        .limit(1000)
-    : Promise.resolve({ data: [] as unknown[] });
+  const stockPromise = staff ? fetchStockWatchlist() : Promise.resolve({ data: [] as unknown[] });
 
   const [wos, reqRes, bonRes, numRes, stockRes] = await Promise.all([
     woPromise,
@@ -373,7 +391,7 @@ async function buildGroups(profile: Profile): Promise<ActionGroup[]> {
     groups.push({
       key: 'low_stock',
       title: 'Stok menipis',
-      description: 'Stok sudah di bawah atau sama dengan minimum.',
+      description: 'Stok sudah di bawah atau sama dengan minimum (part dengan minimum 0 tidak dihitung).',
       count: low.length,
       tone: 'red',
       page: 'inventory',
