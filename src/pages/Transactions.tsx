@@ -38,7 +38,11 @@ type IssueLine = {
 /** Satu baris pada daftar pemasukan. Baris dari PR membawa pr_item_id + batas sisa PR. */
 type ReceiptLine = {
   key: string;
-  spare_part_id: string;
+  spare_part_id: string | null;
+  description: string; // nama part (barang) atau uraian jasa
+  unit: string; // satuan part atau satuan jasa (uom)
+  is_service: boolean;
+  service_key: string | null;
   quantity: number;
   pr_item_id: string | null;
   pr_no: string | null;
@@ -50,13 +54,24 @@ type RecallPR = {
   id: string;
   pr_no: string | null;
   sap_no: string | null;
-  supplier_id: string;
+  supplier_id: string | null;
+  requester_id: string;
   created_at: string;
   supplier: { id: string; code: string; name: string } | null;
-  items: { id: string; spare_part_id: string | null; spare_part_name: string; quantity: number; received_qty: number }[];
+  requester: { full_name: string } | null;
+  items: RecallItem[];
 };
 
-type RecallItem = RecallPR['items'][number];
+type RecallItem = {
+  id: string;
+  spare_part_id: string | null;
+  spare_part_name: string;
+  quantity: number;
+  received_qty: number;
+  is_service: boolean;
+  service_key: string | null;
+  uom: string | null;
+};
 
 function remaining(i: RecallItem): number {
   return Math.round((Number(i.quantity) - Number(i.received_qty)) * 1000) / 1000;
@@ -116,7 +131,7 @@ export default function Transactions() {
   const [receiptForm, setReceiptForm] = useState({ gr_kind: 'credit' as GRKind, source: '', reference: '', notes: '' });
   const [openPrs, setOpenPrs] = useState<RecallPR[]>([]);
   const [loadingPrs, setLoadingPrs] = useState(false);
-  const [recallSupplier, setRecallSupplier] = useState('');
+  const [recallRequester, setRecallRequester] = useState('');
   // Daftar supplier dari database (untuk memilih sumber barang pemasukan).
   const [receiptSuppliers, setReceiptSuppliers] = useState<PickerOption[]>([]);
 
@@ -189,7 +204,7 @@ export default function Transactions() {
     setReceiptForm({ gr_kind: 'credit', source: '', reference: '', notes: '' });
     setGrFiles([]);
     setPreviewGrNo(null);
-    setRecallSupplier('');
+    setRecallRequester('');
     setOpenPrs([]);
     setReceiptSuppliers([]);
     setShowReceipt(true);
@@ -200,13 +215,17 @@ export default function Transactions() {
       supabase
         .from('purchase_requirements')
         .select(
-          'id, pr_no, sap_no, supplier_id, created_at, supplier:inventory_suppliers(id, code, name), items:purchase_requirement_items(id, spare_part_id, spare_part_name, quantity, received_qty)'
+          'id, pr_no, sap_no, supplier_id, requester_id, created_at, supplier:inventory_suppliers(id, code, name), requester:profiles!requester_id(full_name), items:purchase_requirement_items(id, spare_part_id, spare_part_name, quantity, received_qty, is_service, service_key, uom)'
         )
         .eq('status', 'numbered')
         .order('created_at', { ascending: true }),
       fetchAllRows<{ id: string; code: string; name: string }>('inventory_suppliers', 'id, code, name', 'name'),
     ]);
-    const rows = ((prRes.data as unknown as RecallPR[]) ?? []).filter((pr) => (pr.items ?? []).some((i) => remaining(i) > 0));
+    // PR yang masih punya sisa BARANG atau JASA bisa dipanggil di sini. Jasa dicatat lewat
+    // nomor GR yang sama tanpa mengubah stok inventory.
+    const rows = ((prRes.data as unknown as RecallPR[]) ?? []).filter((pr) =>
+      (pr.items ?? []).some((i) => remaining(i) > 0 && (i.spare_part_id || i.is_service))
+    );
     setOpenPrs(rows);
     setLoadingPrs(false);
     setReceiptSuppliers(supp.map((s) => ({
@@ -274,13 +293,13 @@ export default function Transactions() {
     setPreviewGrNo(String(data));
   }
 
-  const recallSuppliers = useMemo<PickerOption[]>(() => {
+  const recallRequesters = useMemo<PickerOption[]>(() => {
     const map = new Map<string, { label: string; count: number }>();
     for (const pr of openPrs) {
-      if (!pr.supplier_id) continue;
-      const cur = map.get(pr.supplier_id);
+      if (!pr.requester_id) continue;
+      const cur = map.get(pr.requester_id);
       if (cur) cur.count += 1;
-      else map.set(pr.supplier_id, { label: pr.supplier ? `${pr.supplier.code} - ${pr.supplier.name}` : '(supplier tidak diketahui)', count: 1 });
+      else map.set(pr.requester_id, { label: pr.requester?.full_name ?? '(peminta tidak diketahui)', count: 1 });
     }
     return Array.from(map.entries())
       .map(([id, s]) => ({
@@ -292,7 +311,7 @@ export default function Transactions() {
       .sort((a, b) => a.label.localeCompare(b.label));
   }, [openPrs]);
 
-  const recallPrs = useMemo(() => openPrs.filter((pr) => pr.supplier_id === recallSupplier), [openPrs, recallSupplier]);
+  const recallPrs = useMemo(() => openPrs.filter((pr) => pr.requester_id === recallRequester), [openPrs, recallRequester]);
 
   /** Tambahkan item PR ke daftar pemasukan (qty awal = sisa PR, boleh diubah untuk penerimaan sebagian). */
   function recallItems(pr: RecallPR, items: RecallItem[]) {
@@ -301,20 +320,42 @@ export default function Transactions() {
     for (const it of items) {
       const rem = remaining(it);
       if (rem <= 0) continue;
-      if (!it.spare_part_id) { unlinked += 1; continue; }
       if (receiptLines.some((l) => l.pr_item_id === it.id)) continue;
-      added.push({
-        key: uuid(),
-        spare_part_id: it.spare_part_id,
-        quantity: rem,
-        pr_item_id: it.id,
-        pr_no: pr.pr_no,
-        supplier_name: pr.supplier?.name ?? null,
-        max: rem,
-      });
+      if (it.is_service) {
+        if (!it.service_key) { unlinked += 1; continue; }
+        added.push({
+          key: uuid(),
+          spare_part_id: null,
+          description: it.spare_part_name,
+          unit: it.uom ?? '',
+          is_service: true,
+          service_key: it.service_key,
+          quantity: rem,
+          pr_item_id: it.id,
+          pr_no: pr.pr_no,
+          supplier_name: pr.supplier?.name ?? null,
+          max: rem,
+        });
+      } else {
+        if (!it.spare_part_id) { unlinked += 1; continue; }
+        const part = parts.find((p) => p.id === it.spare_part_id);
+        added.push({
+          key: uuid(),
+          spare_part_id: it.spare_part_id,
+          description: it.spare_part_name,
+          unit: part?.unit ?? '',
+          is_service: false,
+          service_key: null,
+          quantity: rem,
+          pr_item_id: it.id,
+          pr_no: pr.pr_no,
+          supplier_name: pr.supplier?.name ?? null,
+          max: rem,
+        });
+      }
     }
     if (unlinked > 0) {
-      alert(`${unlinked} item PR belum terhubung ke master spare part (PR lama), jadi tidak bisa dipanggil. Tambahkan manual lewat pencarian spare part.`);
+      alert(`${unlinked} item tidak dapat dipanggil (belum terhubung ke master part / tidak lengkap). Tambahkan manual lewat pencarian spare part.`);
     }
     if (added.length > 0) setReceiptLines((prev) => [...prev, ...added]);
   }
@@ -324,9 +365,9 @@ export default function Transactions() {
     if (!part) return;
     if (!(receiptQty > 0)) { alert('Quantity harus lebih besar dari 0.'); return; }
     setReceiptLines((prev) => {
-      const existing = prev.find((l) => l.spare_part_id === receiptPart && !l.pr_item_id);
+      const existing = prev.find((l) => !l.is_service && l.spare_part_id === receiptPart && !l.pr_item_id);
       if (existing) return prev.map((l) => (l === existing ? { ...l, quantity: l.quantity + receiptQty } : l));
-      return [...prev, { key: uuid(), spare_part_id: receiptPart, quantity: receiptQty, pr_item_id: null, pr_no: null, supplier_name: null, max: null }];
+      return [...prev, { key: uuid(), spare_part_id: receiptPart, description: part.name, unit: part.unit, is_service: false, service_key: null, quantity: receiptQty, pr_item_id: null, pr_no: null, supplier_name: null, max: null }];
     });
     setReceiptPart('');
     setReceiptQty(1);
@@ -337,13 +378,12 @@ export default function Transactions() {
   }
 
   async function submitReceipt() {
-    if (receiptLines.length === 0) { alert('Tambahkan minimal satu barang.'); return; }
+    if (receiptLines.length === 0) { alert('Tambahkan minimal satu barang/jasa.'); return; }
     for (const l of receiptLines) {
-      const part = parts.find((p) => p.id === l.spare_part_id);
-      const name = part?.name ?? 'barang';
+      const name = l.description || 'barang';
       if (!(l.quantity > 0)) { alert(`Quantity ${name} harus lebih besar dari 0.`); return; }
       if (l.max !== null && l.quantity > l.max) {
-        alert(`Qty ${name} melebihi sisa PR (${l.max} ${part?.unit ?? ''}).`);
+        alert(`Qty ${name} melebihi sisa PR (${l.max} ${l.unit || ''}).`);
         return;
       }
     }
@@ -358,7 +398,11 @@ export default function Transactions() {
     try {
       const uploaded = grFiles.length > 0 ? await uploadGrFiles(grFiles) : [];
       const { data, error } = await supabase.rpc('receive_stock_multi', {
-        p_items: receiptLines.map((l) => ({ spare_part_id: l.spare_part_id, quantity: l.quantity, pr_item_id: l.pr_item_id })),
+        p_items: receiptLines.map((l) =>
+          l.is_service
+            ? { spare_part_id: null, service_key: l.service_key, quantity: l.quantity, pr_item_id: l.pr_item_id }
+            : { spare_part_id: l.spare_part_id, quantity: l.quantity, pr_item_id: l.pr_item_id }
+        ),
         p_gr_kind: receiptForm.gr_kind,
         p_gr_no: null, // nomor final dibuat server di dalam transaksi simpan
         p_source: source || null,
@@ -744,7 +788,7 @@ export default function Transactions() {
         <div className="space-y-4">
           <div className="p-3 rounded-lg bg-slate-50 text-sm text-slate-600">
             Diproses langsung oleh <b>Inventory Control/Admin</b>, tanpa approval. Semua barang dalam satu penerimaan memakai <b>satu nomor GR</b>.
-            Barang bisa ditambah manual atau <b>dipanggil dari PR</b> berdasarkan supplier.
+            Barang bisa ditambah manual atau <b>dipanggil dari PR</b> berdasarkan peminta (pemesan).
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -795,22 +839,22 @@ export default function Transactions() {
             </div>
             {loadingPrs ? (
               <p className="text-sm text-slate-400">Memuat PR...</p>
-            ) : recallSuppliers.length === 0 ? (
-              <p className="text-sm text-slate-400">Tidak ada PR bernomor yang masih menunggu barang.</p>
+            ) : recallRequesters.length === 0 ? (
+              <p className="text-sm text-slate-400">Tidak ada PR bernomor yang masih menunggu barang/jasa.</p>
             ) : (
               <>
                 <div>
-                  <Label>Supplier</Label>
+                  <Label>Peminta (Pemesan)</Label>
                   <SearchablePicker
                     inline
-                    value={recallSupplier}
-                    onChange={setRecallSupplier}
-                    placeholder="Cari supplier..."
-                    emptyText="Supplier tidak ditemukan"
-                    options={recallSuppliers}
+                    value={recallRequester}
+                    onChange={setRecallRequester}
+                    placeholder="Cari peminta..."
+                    emptyText="Peminta tidak ditemukan"
+                    options={recallRequesters}
                   />
                 </div>
-                {recallSupplier && (
+                {recallRequester && (
                   <div className="space-y-2">
                     {recallPrs.map((pr) => (
                       <div key={pr.id} className="rounded-lg bg-white border border-slate-200 p-3 space-y-2">
@@ -826,16 +870,24 @@ export default function Transactions() {
                         <div className="divide-y divide-slate-100">
                           {pr.items.filter((i) => remaining(i) > 0).map((it) => {
                             const already = receiptLines.some((l) => l.pr_item_id === it.id);
+                            const unit = it.is_service ? (it.uom ?? '') : '';
                             return (
                               <div key={it.id} className="flex items-center justify-between gap-2 py-1.5">
                                 <div className="min-w-0">
-                                  <p className="text-sm text-slate-800 truncate">{it.spare_part_name}</p>
+                                  <p className="text-sm text-slate-800 truncate">
+                                    {it.spare_part_name}
+                                    {it.is_service && (
+                                      <span className="ml-1.5 inline-flex items-center rounded bg-violet-100 text-violet-700 px-1.5 py-0.5 text-[10px] font-semibold uppercase">Jasa</span>
+                                    )}
+                                  </p>
                                   <p className="text-xs text-slate-400">
-                                    Dipesan {it.quantity} • diterima {it.received_qty} • sisa <b>{remaining(it)}</b>
-                                    {!it.spare_part_id && ' • belum terhubung ke master part'}
+                                    {it.is_service
+                                      ? `Diminta ${it.quantity}${unit ? ` ${unit}` : ''} • diterima ${it.received_qty} • sisa <b>${remaining(it)}</b>`
+                                      : `Dipesan ${it.quantity} • diterima ${it.received_qty} • sisa <b>${remaining(it)}</b>`}
+                                    {!it.spare_part_id && !it.is_service && ' • belum terhubung ke master part'}
                                   </p>
                                 </div>
-                                <Button size="sm" variant="secondary" disabled={already || !it.spare_part_id} onClick={() => recallItems(pr, [it])}>
+                                <Button size="sm" variant="secondary" disabled={already || (!it.spare_part_id && !it.is_service)} onClick={() => recallItems(pr, [it])}>
                                   {already ? 'Sudah ada' : 'Tambah'}
                                 </Button>
                               </div>
@@ -878,14 +930,18 @@ export default function Transactions() {
             ) : (
               <div className="rounded-lg bg-slate-50 divide-y divide-slate-100">
                 {receiptLines.map((l) => {
-                  const part = parts.find((p) => p.id === l.spare_part_id);
+                  const part = l.is_service ? null : parts.find((p) => p.id === l.spare_part_id);
                   const qty = Number(l.quantity) || 0;
                   return (
                     <div key={l.key} className="flex items-center justify-between gap-3 px-3 py-2">
                       <div className="min-w-0">
-                        <p className="text-sm font-medium text-slate-900 truncate">{part?.name}</p>
+                        <p className="text-sm font-medium text-slate-900 truncate">{l.is_service ? l.description : part?.name}</p>
                         <p className="text-xs text-slate-400">
-                          {part?.code} • stok {part?.current_stock} → {(part?.current_stock ?? 0) + qty} {part?.unit}
+                          {l.is_service ? (
+                            <>Jasa • satuan {l.unit || '-'} (tidak mengubah stok)</>
+                          ) : (
+                            <>{part?.code} • stok {part?.current_stock} → {(part?.current_stock ?? 0) + qty} {part?.unit}</>
+                          )}
                           {l.pr_no && <span className="ml-1 text-blue-600">• PR {l.pr_no}{l.max !== null && ` (maks ${l.max})`}</span>}
                         </p>
                       </div>
@@ -899,7 +955,7 @@ export default function Transactions() {
                           onChange={(e) => updateReceiptQty(l.key, Number(e.target.value))}
                           className="w-24"
                         />
-                        <span className="text-xs text-slate-500 w-10">{part?.unit}</span>
+                        <span className="text-xs text-slate-500 w-14">{l.unit}</span>
                         <button onClick={() => setReceiptLines((prev) => prev.filter((x) => x.key !== l.key))} className="text-red-500 hover:text-red-700 p-1" aria-label="Hapus dari daftar">
                           <Trash2 className="w-4 h-4" />
                         </button>
@@ -945,7 +1001,7 @@ export default function Transactions() {
           <div className="flex justify-end gap-2">
             <Button variant="secondary" onClick={() => setShowReceipt(false)} disabled={acting}>Batal</Button>
             <Button onClick={submitReceipt} disabled={acting || receiptLines.length === 0}>
-              {acting ? 'Memproses...' : `Simpan Pemasukan (${receiptLines.length} barang)`}
+              {acting ? 'Memproses...' : `Simpan Pemasukan (${receiptLines.length} barang/jasa)`}
             </Button>
           </div>
         </div>

@@ -16,6 +16,9 @@ type PrItem = {
   spare_part_name: string;
   quantity: number;
   received_qty: number;
+  is_service: boolean;
+  service_key: string | null;
+  uom: string | null;
   spare_part?: { code: string; unit: string } | null;
 };
 
@@ -35,7 +38,7 @@ type PurchaseRequirement = {
   id: string;
   requester_id: string;
   machine_name: string | null;
-  supplier_id: string;
+  supplier_id: string | null;
   sap_no: string | null;
   pr_no: string | null;
   attachment_files: string[] | null;
@@ -59,7 +62,7 @@ function supplierPickerOptions(list: { id: string; code: string; name: string }[
 }
 
 const PR_SELECT =
-  'id, requester_id, machine_name, supplier_id, sap_no, pr_no, attachment_files, status, created_by, created_at, numbered_by, numbered_at, requester:profiles!requester_id(full_name), supplier:inventory_suppliers(id, code, name), creator:profiles!created_by(full_name), numberer:profiles!numbered_by(full_name), items:purchase_requirement_items(id, spare_part_id, spare_part_name, quantity, received_qty, spare_part:spare_parts(code, unit))';
+  'id, requester_id, machine_name, supplier_id, sap_no, pr_no, attachment_files, status, created_by, created_at, numbered_by, numbered_at, requester:profiles!requester_id(full_name), supplier:inventory_suppliers(id, code, name), creator:profiles!created_by(full_name), numberer:profiles!numbered_by(full_name), items:purchase_requirement_items(id, spare_part_id, spare_part_name, quantity, received_qty, is_service, service_key, uom, spare_part:spare_parts(code, unit))';
 
 const STATUS_LABELS: Record<PurchaseRequirementStatus, string> = {
   pending_numbering: 'Menunggu Nomor SAP/PR',
@@ -132,19 +135,26 @@ function PrItemsList({ row }: { row: PurchaseRequirement }) {
   return (
     <div className="rounded-lg bg-slate-50 divide-y divide-slate-100">
       {items.map((it) => {
-        const unit = it.spare_part?.unit ?? '';
+        const unit = it.is_service ? (it.uom ?? 'vol.') : (it.spare_part?.unit ?? '');
         const complete = Number(it.received_qty) >= Number(it.quantity);
         return (
           <div key={it.id} className="flex items-center justify-between gap-3 px-3 py-1.5">
             <div className="min-w-0">
-              <p className="text-sm text-slate-800 truncate">{it.spare_part_name}</p>
-              {it.spare_part?.code && <p className="text-xs text-slate-400">{it.spare_part.code}</p>}
+              <p className="text-sm text-slate-800 truncate">
+                {it.spare_part_name}
+                {it.is_service && (
+                  <span className="ml-1.5 inline-flex items-center rounded bg-violet-100 text-violet-700 px-1.5 py-0.5 text-[10px] font-semibold uppercase">Jasa</span>
+                )}
+              </p>
+              {it.is_service ? (it.uom ? <p className="text-xs text-slate-400">Satuan: {it.uom}</p> : null) : it.spare_part?.code ? <p className="text-xs text-slate-400">{it.spare_part.code}</p> : null}
             </div>
             <div className="text-sm text-right flex-shrink-0">
               {showProgress ? (
                 <>
                   <span className="font-semibold text-slate-900">{it.received_qty}/{it.quantity}</span> {unit}
-                  <p className={`text-xs ${complete ? 'text-emerald-600' : 'text-slate-400'}`}>{complete ? 'Lengkap' : 'Diterima / dipesan'}</p>
+                  <p className={`text-xs ${complete ? 'text-emerald-600' : 'text-slate-400'}`}>
+                    {it.is_service ? (complete ? 'Selesai' : 'Terpenuhi / diminta') : (complete ? 'Lengkap' : 'Diterima / dipesan')}
+                  </p>
                 </>
               ) : (
                 <span className="font-semibold text-slate-900">{it.quantity} {unit}</span>
@@ -320,6 +330,7 @@ function EditPrModal({
   partOptions,
   requesters,
   suppliers,
+  units,
   canEditNumbers,
   onClose,
   onSaved,
@@ -329,6 +340,7 @@ function EditPrModal({
   partOptions: PickerOption[];
   requesters: Profile[];
   suppliers: { id: string; code: string; name: string }[];
+  units: string[];
   canEditNumbers: boolean;
   onClose: () => void;
   onSaved: () => void | Promise<void>;
@@ -338,13 +350,24 @@ function EditPrModal({
     for (const it of row.items ?? []) if (it.spare_part_id) m.set(it.spare_part_id, Number(it.received_qty));
     return m;
   }, [row]);
-  const legacy = (row.items ?? []).filter((i) => !i.spare_part_id);
+  const svcReceived = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const it of row.items ?? []) if (it.is_service && it.service_key) m.set(it.service_key, Number(it.received_qty));
+    return m;
+  }, [row]);
+  const legacy = (row.items ?? []).filter((i) => !i.spare_part_id && !i.is_service);
   const supplierLocked = (row.items ?? []).some((i) => Number(i.received_qty) > 0);
 
   const [items, setItems] = useState<{ spare_part_id: string; quantity: number }[]>(() =>
     (row.items ?? [])
       .filter((i) => i.spare_part_id)
       .map((i) => ({ spare_part_id: i.spare_part_id as string, quantity: Number(i.quantity) }))
+  );
+  // Item jasa pada PR (dikenali lewat service_key)
+  const [serviceItems, setServiceItems] = useState<{ service_key: string; description: string; quantity: number; uom: string }[]>(() =>
+    (row.items ?? [])
+      .filter((i) => i.is_service && i.service_key)
+      .map((i) => ({ service_key: i.service_key as string, description: i.spare_part_name, quantity: Number(i.quantity), uom: i.uom ?? '' }))
   );
   const [form, setForm] = useState({
     requester_id: row.requester_id,
@@ -353,6 +376,9 @@ function EditPrModal({
   });
   const [itemPart, setItemPart] = useState('');
   const [itemQty, setItemQty] = useState(1);
+  const [svcDescription, setSvcDescription] = useState('');
+  const [svcVolume, setSvcVolume] = useState(1);
+  const [svcUnit, setSvcUnit] = useState('');
   const [keptFiles, setKeptFiles] = useState<string[]>(row.attachment_files ?? []);
   const [newFiles, setNewFiles] = useState<File[]>([]);
   const [saving, setSaving] = useState(false);
@@ -378,9 +404,38 @@ function EditPrModal({
     setItemQty(1);
   }
 
+  function addServiceItem() {
+    if (!svcDescription.trim()) {
+      alert('Tulis uraian jasa terlebih dahulu.');
+      return;
+    }
+    if (!svcUnit.trim()) {
+      alert('Pilih satuan jasa (dari master satuan).');
+      return;
+    }
+    if (!Number.isFinite(svcVolume) || svcVolume <= 0) {
+      alert('Volume harus lebih besar dari 0.');
+      return;
+    }
+    setServiceItems((prev) => [
+      ...prev,
+      { service_key: uuid(), description: svcDescription.trim(), quantity: svcVolume, uom: svcUnit.trim() },
+    ]);
+    setSvcDescription('');
+    setSvcVolume(1);
+    setSvcUnit('');
+  }
+
+  function buildPrPayload() {
+    return [
+      ...items.map((i) => ({ spare_part_id: i.spare_part_id, quantity: i.quantity })),
+      ...serviceItems.map((s) => ({ service_key: s.service_key, description: s.description, quantity: s.quantity, uom: s.uom })),
+    ];
+  }
+
   async function save() {
-    if (items.length === 0) {
-      alert('Tambahkan minimal satu spare part.');
+    if (items.length === 0 && serviceItems.length === 0) {
+      alert('Tambahkan minimal satu spare part atau jasa.');
       return;
     }
     for (const i of items) {
@@ -395,8 +450,25 @@ function EditPrModal({
         return;
       }
     }
-    if (!form.requester_id || !form.supplier_id) {
-      alert('Pemesan dan supplier wajib dipilih.');
+    for (const s of serviceItems) {
+      if (!Number.isFinite(s.quantity) || s.quantity <= 0) {
+        alert(`Volume jasa ${s.description} harus lebih besar dari 0.`);
+        return;
+      }
+      const rec = svcReceived.get(s.service_key) ?? 0;
+      if (rec > 0) {
+        if (s.quantity < rec) {
+          alert(`Volume jasa ${s.description} tidak boleh lebih kecil dari yang sudah terpenuhi (${rec}).`);
+          return;
+        }
+        if (s.description.trim() !== (row.items ?? []).find((x) => x.service_key === s.service_key)?.spare_part_name) {
+          alert(`Uraian jasa ${s.description} tidak boleh diubah karena sudah ada pemenuhan (${rec}).`);
+          return;
+        }
+      }
+    }
+    if (!form.requester_id) {
+      alert('Pemesan wajib dipilih.');
       return;
     }
     if (numbersChanged) {
@@ -414,13 +486,20 @@ function EditPrModal({
       }
     }
 
-    const sig = (list: { spare_part_id: string | null; quantity: number }[]) =>
-      list.filter((i) => i.spare_part_id).map((i) => `${i.spare_part_id}:${Number(i.quantity)}`).sort().join('|');
+    const rowPayload = (row.items ?? []).map((i) =>
+      i.is_service && i.service_key
+        ? { service_key: i.service_key, description: i.spare_part_name, quantity: Number(i.quantity), uom: i.uom }
+        : { spare_part_id: i.spare_part_id, quantity: Number(i.quantity) }
+    );
+    const sortKey = (o: Record<string, unknown>) => JSON.stringify(o);
+    const sameItems =
+      JSON.stringify([...buildPrPayload()].sort((a, b) => sortKey(a).localeCompare(sortKey(b)))) ===
+      JSON.stringify([...rowPayload].sort((a, b) => sortKey(a).localeCompare(sortKey(b))));
     const mainChanged =
-      sig(items) !== sig(row.items ?? []) ||
+      !sameItems ||
       legacy.length > 0 ||
       form.requester_id !== row.requester_id ||
-      form.supplier_id !== row.supplier_id ||
+      (form.supplier_id || null) !== row.supplier_id ||
       form.machine_name.trim() !== (row.machine_name ?? '').trim();
     const filesChanged = newFiles.length > 0 || keptFiles.length !== (row.attachment_files ?? []).length;
     if (!mainChanged && !filesChanged && !numbersChanged) {
@@ -432,10 +511,10 @@ function EditPrModal({
     if (mainChanged) {
       const { error } = await supabase.rpc('update_purchase_requirement_items', {
         p_pr_id: row.id,
-        p_items: items,
+        p_items: buildPrPayload(),
         p_requester_id: form.requester_id,
         p_machine_name: form.machine_name.trim() || null,
-        p_supplier_id: form.supplier_id,
+        p_supplier_id: form.supplier_id || null,
       });
       if (error) {
         setSaving(false);
@@ -506,13 +585,13 @@ function EditPrModal({
             </Select>
           </div>
           <div>
-            <Label>Supplier *</Label>
+            <Label>Supplier (opsional)</Label>
             <SearchablePicker
               inline
-              value={form.supplier_id}
+              value={form.supplier_id ?? ''}
               onChange={(v) => setForm((f) => ({ ...f, supplier_id: v }))}
               disabled={supplierLocked}
-              placeholder="Cari & pilih supplier..."
+              placeholder="Cari & pilih supplier (bisa dikosongkan)..."
               searchPlaceholder="Ketik nama atau kode supplier..."
               emptyText="Supplier tidak ditemukan. Tambahkan dulu di Master Data Inventory."
               options={supplierPickerOptions(suppliers)}
@@ -583,6 +662,82 @@ function EditPrModal({
                         onClick={() => setItems((prev) => prev.filter((x) => x.spare_part_id !== i.spare_part_id))}
                         className="text-red-500 hover:text-red-700 p-1 disabled:opacity-30 disabled:cursor-not-allowed"
                         aria-label="Hapus dari daftar"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-lg border border-violet-200 bg-violet-50/30 p-3 space-y-3">
+          <p className="text-xs font-semibold text-violet-700">
+            <Plus className="inline w-3.5 h-3.5 mr-1" /> Jasa / Service (bukan barang, tidak memakai stock master)
+          </p>
+          <div className="flex flex-col sm:flex-row gap-2 items-end">
+            <div className="flex-1 w-full">
+              <Label>Uraian Jasa *</Label>
+              <Input
+                value={svcDescription}
+                onChange={(e) => setSvcDescription(e.target.value)}
+                placeholder="Contoh: Jasa pemasangan, perawatan, perbaikan..."
+              />
+            </div>
+            <div className="w-28">
+              <Label>Satuan *</Label>
+              <Select value={svcUnit} onChange={(e) => setSvcUnit(e.target.value)}>
+                <option value="">Pilih satuan...</option>
+                {units.map((u) => (
+                  <option key={u} value={u}>{u}</option>
+                ))}
+              </Select>
+            </div>
+            <div className="w-24">
+              <Label>Volume</Label>
+              <Input type="number" min={0.01} step="any" value={svcVolume || ''} onChange={(e) => setSvcVolume(Number(e.target.value))} />
+            </div>
+            <Button size="sm" variant="secondary" onClick={addServiceItem} disabled={!svcDescription.trim() || !svcUnit.trim()}>
+              <Plus className="w-4 h-4" /> Tambah
+            </Button>
+          </div>
+
+          {serviceItems.length === 0 ? (
+            <p className="text-sm text-slate-400">Belum ada jasa di daftar PR</p>
+          ) : (
+            <div className="rounded-lg bg-white divide-y divide-slate-100">
+              {serviceItems.map((s) => {
+                const rec = svcReceived.get(s.service_key) ?? 0;
+                return (
+                  <div key={s.service_key} className="flex items-center justify-between gap-3 px-3 py-2">
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-slate-900 truncate">{s.description}</p>
+                      <p className="text-xs text-slate-400">
+                        Jasa • volume {s.quantity} {s.uom}
+                        {rec > 0 && <span className="ml-1 text-emerald-600">• sudah terpenuhi {rec} {s.uom}</span>}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <Input
+                        type="number"
+                        min={rec > 0 ? rec : 0.01}
+                        step="any"
+                        value={s.quantity || ''}
+                        onChange={(e) =>
+                          setServiceItems((prev) => prev.map((x) => (x.service_key === s.service_key ? { ...x, quantity: Number(e.target.value) } : x)))
+                        }
+                        className="w-24"
+                      />
+                      <span className="text-xs text-slate-500 w-14">{s.uom}</span>
+                      <button
+                        type="button"
+                        disabled={rec > 0}
+                        title={rec > 0 ? 'Sudah ada pemenuhan, tidak bisa dihapus' : 'Hapus jasa'}
+                        onClick={() => setServiceItems((prev) => prev.filter((x) => x.service_key !== s.service_key))}
+                        className="text-red-500 hover:text-red-700 p-1 disabled:opacity-30 disabled:cursor-not-allowed"
+                        aria-label="Hapus jasa"
                       >
                         <Trash2 className="w-4 h-4" />
                       </button>
@@ -671,7 +826,7 @@ function EditPrModal({
 
         <div className="flex justify-end gap-2">
           <Button variant="secondary" onClick={onClose} disabled={saving}>Batal</Button>
-          <Button onClick={save} disabled={saving || items.length === 0 || (numbersChanged && numReason.trim().length < 3)}>
+          <Button onClick={save} disabled={saving || (items.length === 0 && serviceItems.length === 0) || (numbersChanged && numReason.trim().length < 3)}>
             {saving ? 'Menyimpan...' : 'Simpan Perubahan'}
           </Button>
         </div>
@@ -702,9 +857,15 @@ export default function PurchaseRequirements() {
   });
   const [parts, setParts] = useState<PartOption[]>([]);
   const [groupNames, setGroupNames] = useState<Record<string, string>>({});
+  const [units, setUnits] = useState<string[]>([]);
   const [items, setItems] = useState<{ spare_part_id: string; quantity: number }[]>([]);
   const [itemPart, setItemPart] = useState('');
   const [itemQty, setItemQty] = useState(1);
+  // Item jasa/service (tidak memakai spare part master)
+  const [serviceItems, setServiceItems] = useState<{ service_key: string; description: string; quantity: number; uom: string }[]>([]);
+  const [svcDescription, setSvcDescription] = useState('');
+  const [svcVolume, setSvcVolume] = useState(1);
+  const [svcUnit, setSvcUnit] = useState('');
 
   const supplierOptions = useMemo(() => supplierPickerOptions(suppliers), [suppliers]);
 
@@ -748,7 +909,7 @@ export default function PurchaseRequirements() {
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [{ data: req }, { data: users }, sups, allSp, grps] = await Promise.all([
+    const [{ data: req }, { data: users }, sups, allSp, grps, unitRows] = await Promise.all([
       supabase.from('purchase_requirements').select(PR_SELECT).order('created_at', { ascending: false }),
       supabase.from('profiles').select('*').eq('is_active', true).order('full_name'),
       fetchAllRows<{ id: string; code: string; name: string }>('inventory_suppliers', 'id, code, name', 'name'),
@@ -758,6 +919,7 @@ export default function PurchaseRequirements() {
         'name'
       ),
       fetchAllRows<GroupInfo>('inventory_groups', 'id, name', 'name'),
+      fetchAllRows<{ id: string; code: string; name: string }>('units_of_measure', 'id, code, name', 'name'),
     ]);
 
     const requesterRows = (users as Profile[]) ?? [];
@@ -767,6 +929,7 @@ export default function PurchaseRequirements() {
     setSuppliers(supplierRows);
     setParts((allSp ?? []) as PartOption[]);
     setGroupNames(groupNameMap(grps ?? []));
+    setUnits((unitRows ?? []).map((u) => u.name));
 
     // Nilai awal form. Supplier tidak ditebak: hanya dipilihkan otomatis bila cuma ada satu supplier.
     setForm((f) => ({
@@ -813,10 +976,44 @@ export default function PurchaseRequirements() {
     setItems((prev) => prev.map((i) => (i.spare_part_id === sparePartId ? { ...i, quantity } : i)));
   }
 
+  function addServiceItem() {
+    if (!svcDescription.trim()) {
+      alert('Tulis uraian jasa terlebih dahulu.');
+      return;
+    }
+    if (!svcUnit.trim()) {
+      alert('Pilih satuan jasa (dari master satuan).');
+      return;
+    }
+    if (!Number.isFinite(svcVolume) || svcVolume <= 0) {
+      alert('Volume harus lebih besar dari 0.');
+      return;
+    }
+    setServiceItems((prev) => [
+      ...prev,
+      { service_key: uuid(), description: svcDescription.trim(), quantity: svcVolume, uom: svcUnit.trim() },
+    ]);
+    setSvcDescription('');
+    setSvcVolume(1);
+    setSvcUnit('');
+  }
+
+  function removeServiceItem(key: string) {
+    setServiceItems((prev) => prev.filter((x) => x.service_key !== key));
+  }
+
+  /** Gabungkan daftar barang + jasa menjadi p_items untuk RPC. */
+  function buildPrPayload(base: { spare_part_id: string; quantity: number }[]) {
+    return [
+      ...base.map((i) => ({ spare_part_id: i.spare_part_id, quantity: i.quantity })),
+      ...serviceItems.map((s) => ({ service_key: s.service_key, description: s.description, quantity: s.quantity, uom: s.uom })),
+    ];
+  }
+
   async function createPR() {
     if (!canCreate) return;
-    if (items.length === 0) {
-      alert('Tambahkan minimal satu spare part.');
+    if (items.length === 0 && serviceItems.length === 0) {
+      alert('Tambahkan minimal satu spare part atau jasa.');
       return;
     }
     const bad = items.find((i) => !Number.isFinite(i.quantity) || i.quantity <= 0);
@@ -825,21 +1022,21 @@ export default function PurchaseRequirements() {
       alert(`Quantity ${name} harus lebih besar dari 0.`);
       return;
     }
-    if (!form.requester_id) {
-      alert('Pemesan wajib dipilih.');
+    if (serviceItems.some((s) => !Number.isFinite(s.quantity) || s.quantity <= 0)) {
+      alert('Volume jasa harus lebih besar dari 0.');
       return;
     }
-    if (!form.supplier_id) {
-      alert('Supplier wajib dipilih.');
+    if (!form.requester_id) {
+      alert('Pemesan wajib dipilih.');
       return;
     }
 
     setActing(true);
     const { data, error } = await supabase.rpc('create_purchase_requirement_items', {
-      p_items: items,
+      p_items: buildPrPayload(items),
       p_requester_id: form.requester_id,
       p_machine_name: form.machine_name.trim() || null,
-      p_supplier_id: form.supplier_id,
+      p_supplier_id: form.supplier_id || null,
     });
 
     if (error) {
@@ -873,6 +1070,10 @@ export default function PurchaseRequirements() {
     setItems([]);
     setItemPart('');
     setItemQty(1);
+    setServiceItems([]);
+    setSvcDescription('');
+    setSvcVolume(1);
+    setSvcUnit('');
     setAttachmentFiles([]);
     await load();
   }
@@ -977,6 +1178,68 @@ export default function PurchaseRequirements() {
                 </div>
               )}
             </div>
+            <div className="sm:col-span-2 rounded-lg border border-violet-200 bg-violet-50/30 p-3 space-y-3">
+              <p className="text-xs font-semibold text-violet-700">
+                <Plus className="inline w-3.5 h-3.5 mr-1" /> Jasa / Service (bukan barang, tidak memakai stock master)
+              </p>
+              <div className="flex flex-col sm:flex-row gap-2 items-end">
+                <div className="flex-1 w-full">
+                  <Label>Uraian Jasa *</Label>
+                  <Input
+                    value={svcDescription}
+                    onChange={(e) => setSvcDescription(e.target.value)}
+                    placeholder="Contoh: Jasa pemasangan, perawatan, perbaikan..."
+                  />
+                </div>
+                <div className="w-28">
+                  <Label>Satuan *</Label>
+                  <Select value={svcUnit} onChange={(e) => setSvcUnit(e.target.value)}>
+                    <option value="">Pilih satuan...</option>
+                    {units.map((u) => (
+                      <option key={u} value={u}>{u}</option>
+                    ))}
+                  </Select>
+                </div>
+                <div className="w-24">
+                  <Label>Volume</Label>
+                  <Input type="number" min={0.01} step="any" value={svcVolume || ''} onChange={(e) => setSvcVolume(Number(e.target.value))} />
+                </div>
+                <Button size="sm" variant="secondary" onClick={addServiceItem} disabled={!svcDescription.trim() || !svcUnit.trim()}>
+                  <Plus className="w-4 h-4" /> Tambah
+                </Button>
+              </div>
+
+              {serviceItems.length === 0 ? (
+                <p className="text-sm text-slate-400">Belum ada jasa di daftar PR</p>
+              ) : (
+                <div className="rounded-lg bg-white divide-y divide-slate-100">
+                  {serviceItems.map((s) => (
+                    <div key={s.service_key} className="flex items-center justify-between gap-3 px-3 py-2">
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-slate-900 truncate">{s.description}</p>
+                        <p className="text-xs text-slate-400">Jasa • volume {s.quantity} {s.uom}</p>
+                      </div>
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        <Input
+                          type="number"
+                          min={0.01}
+                          step="any"
+                          value={s.quantity || ''}
+                          onChange={(e) =>
+                            setServiceItems((prev) => prev.map((x) => (x.service_key === s.service_key ? { ...x, quantity: Number(e.target.value) } : x)))
+                          }
+                          className="w-24"
+                        />
+                        <span className="text-xs text-slate-500 w-14">{s.uom}</span>
+                        <button type="button" onClick={() => removeServiceItem(s.service_key)} className="text-red-500 hover:text-red-700 p-1" aria-label="Hapus jasa">
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
             <div>
               <Label>Pemesan *</Label>
               <Select value={form.requester_id} onChange={(e) => setForm((f) => ({ ...f, requester_id: e.target.value }))}>
@@ -987,12 +1250,12 @@ export default function PurchaseRequirements() {
               </Select>
             </div>
             <div>
-              <Label>Supplier *</Label>
+              <Label>Supplier (opsional)</Label>
               <SearchablePicker
                 inline
                 value={form.supplier_id}
                 onChange={(v) => setForm((f) => ({ ...f, supplier_id: v }))}
-                placeholder="Cari & pilih supplier..."
+                placeholder="Cari & pilih supplier (bisa dikosongkan)..."
                 searchPlaceholder="Ketik nama atau kode supplier..."
                 emptyText="Supplier tidak ditemukan. Tambahkan dulu di Master Data Inventory."
                 options={supplierOptions}
@@ -1040,7 +1303,7 @@ export default function PurchaseRequirements() {
 
           <div className="flex justify-end">
             <Button onClick={createPR} disabled={acting}>
-              {acting ? 'Menyimpan...' : `Buat PR (${items.length} item)`}
+              {acting ? 'Menyimpan...' : `Buat PR (${items.length + serviceItems.length} item)`}
             </Button>
           </div>
         </Card>
@@ -1190,6 +1453,7 @@ export default function PurchaseRequirements() {
           partOptions={partOptions}
           requesters={requesters}
           suppliers={suppliers}
+          units={units}
           canEditNumbers={profile.role === 'admin'}
           onClose={() => setEditingRow(null)}
           onSaved={async () => {
