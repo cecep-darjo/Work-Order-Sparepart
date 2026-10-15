@@ -283,12 +283,25 @@ async function buildGroups(profile: Profile): Promise<ActionGroup[]> {
     : Promise.resolve({ data: [] as unknown[] });
   const stockPromise = staff ? fetchStockWatchlist() : Promise.resolve({ data: [] as unknown[] });
 
-  const [wos, reqRes, bonRes, numRes, stockRes] = await Promise.all([
+  // ---- Jobs Assignment (penugasan teknisi) --------------------------------
+  // Teknisi: tugas aktif miliknya. Atasan (admin/SS/SPV): laporan menunggu approval + tugas terlambat.
+  const isManager = isAdmin || isSS || isSpv;
+  let jobQuery = supabase
+    .from('job_assignments')
+    .select('id, job_no, title, status, deadline, technician:profiles!technician_id(full_name)')
+    .order('deadline', { ascending: true })
+    .limit(LIMIT);
+  if (isTech) jobQuery = jobQuery.eq('technician_id', profile.id).in('status', ['assigned', 'on_the_way', 'in_progress']);
+  else jobQuery = jobQuery.in('status', ['assigned', 'on_the_way', 'in_progress', 'done']);
+  const jobPromise = isTech || isManager ? jobQuery : Promise.resolve({ data: [] as unknown[] });
+
+  const [wos, reqRes, bonRes, numRes, stockRes, jobRes] = await Promise.all([
     woPromise,
     reqPromise,
     bonPromise,
     numPromise,
     stockPromise,
+    jobPromise,
   ]);
 
   // WO: dikelompokkan memakai aturan yang sama dengan halaman daftar WO
@@ -309,6 +322,73 @@ async function buildGroups(profile: Profile): Promise<ActionGroup[]> {
       page: 'workorders',
       rows: woRows(list),
     });
+  }
+
+  // Jobs Assignment (error / migration belum dijalankan -> data null -> tidak ada grup)
+  type JobRow = {
+    id: string;
+    job_no: string;
+    title: string;
+    status: string;
+    deadline: string;
+    technician: { full_name: string } | null;
+  };
+  const jobs = (jobRes.data as unknown as JobRow[]) ?? [];
+  const nowMs = Date.now();
+  const isLate = (j: JobRow) => j.status !== 'done' && new Date(j.deadline).getTime() < nowMs;
+  const fmtDue = (iso: string) => new Date(iso).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' });
+  const jobStatusLabel: Record<string, string> = {
+    assigned: 'Ditugaskan',
+    on_the_way: 'On the Way',
+    in_progress: 'In Progress',
+  };
+
+  if (isTech && jobs.length) {
+    groups.push({
+      key: 'job_active',
+      title: 'Tugas penugasan aktif',
+      description: 'Update status dan unggah foto bukti kerja.',
+      count: jobs.length,
+      tone: jobs.some(isLate) ? 'red' : 'blue',
+      page: 'job_assignments',
+      rows: jobs.map((j) => ({
+        id: j.id,
+        title: j.title,
+        subtitle: `${j.job_no} • ${jobStatusLabel[j.status] ?? j.status} • deadline ${fmtDue(j.deadline)}${isLate(j) ? ' (terlambat)' : ''}`,
+      })),
+    });
+  }
+  if (isManager) {
+    const review = jobs.filter((j) => j.status === 'done');
+    if (review.length)
+      groups.push({
+        key: 'job_review',
+        title: 'Laporan tugas menunggu approval',
+        description: 'Teknisi sudah selesai; review foto & laporan lalu approve atau tolak.',
+        count: review.length,
+        tone: 'amber',
+        page: 'job_assignments',
+        rows: review.map((j) => ({
+          id: j.id,
+          title: j.title,
+          subtitle: `${j.job_no}${j.technician?.full_name ? ` • ${j.technician.full_name}` : ''}`,
+        })),
+      });
+    const late = jobs.filter(isLate);
+    if (late.length)
+      groups.push({
+        key: 'job_overdue',
+        title: 'Tugas melewati deadline',
+        description: 'Belum selesai padahal deadline sudah lewat.',
+        count: late.length,
+        tone: 'red',
+        page: 'job_assignments',
+        rows: late.map((j) => ({
+          id: j.id,
+          title: j.title,
+          subtitle: `${j.job_no}${j.technician?.full_name ? ` • ${j.technician.full_name}` : ''} • deadline ${fmtDue(j.deadline)}`,
+        })),
+      });
   }
 
   // Permintaan spare part

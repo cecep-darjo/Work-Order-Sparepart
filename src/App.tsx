@@ -6,6 +6,7 @@ import Layout, { type PageKey } from '@/components/Layout';
 import Dashboard from '@/pages/Dashboard';
 import WorkOrders from '@/pages/WorkOrders';
 import WorkOrderDetail from '@/pages/WorkOrderDetail';
+import JobAssignments from '@/pages/JobAssignments';
 import SpareParts from '@/pages/SpareParts';
 import Transactions from '@/pages/Transactions';
 import PurchaseRequirements from '@/pages/PurchaseRequirements';
@@ -59,6 +60,7 @@ function AppContent() {
         <>
           {page === 'dashboard' && <Dashboard onNavigate={navigate} onOpenWO={setSelectedWO} />}
           {page === 'workorders' && <WorkOrders onSelectWO={setSelectedWO} />}
+          {page === 'job_assignments' && <JobAssignments />}
           {page === 'spareparts' && <SpareParts />}
           {page === 'transactions' && <Transactions />}
           {page === 'goods_receipts' && <GoodsReceipts />}

@@ -18,11 +18,13 @@ import {
   FileText,
   ClipboardCheck,
   PenLine,
+  HardHat,
 } from 'lucide-react';
 
 export type PageKey =
   | 'dashboard'
   | 'workorders'
+  | 'job_assignments'
   | 'inventory'
   | 'spareparts'
   | 'transactions'
@@ -41,6 +43,7 @@ const NAV_ITEMS: {
 }[] = [
   { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: ['admin', 'ss', 'spv', 'teknisi', 'inventory'] },
   { key: 'workorders', label: 'Work Orders', icon: ClipboardList, roles: ['admin', 'ss', 'spv', 'teknisi'] },
+  { key: 'job_assignments', label: 'Jobs Assignment', icon: HardHat, roles: ['admin', 'ss', 'spv', 'teknisi'] },
   { key: 'bons', label: 'Bon Sparepart', icon: ClipboardCheck, roles: ['admin', 'ss', 'spv', 'teknisi', 'inventory'] },
   { key: 'spareparts', label: 'Spare Parts', icon: Package, roles: ['admin', 'ss', 'inventory'] },
   { key: 'transactions', label: 'Inventory Transactions', icon: Boxes, roles: ['admin', 'inventory'] },
