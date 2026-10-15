@@ -66,10 +66,31 @@ function abjadValue(name: string): string {
   return '000';
 }
 
+const PAGE_SIZE = 20;
+
+/** Daftar nomor halaman dengan elipsis, mis. 1 … 4 5 6 … 20. */
+function pageList(current: number, total: number): (number | '…')[] {
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+  const set = new Set<number>([1, total, current - 1, current, current + 1]);
+  if (current <= 3) [2, 3, 4].forEach((n) => set.add(n));
+  if (current >= total - 2) [total - 3, total - 2, total - 1].forEach((n) => set.add(n));
+  const nums = [...set].filter((n) => n >= 1 && n <= total).sort((a, b) => a - b);
+  const out: (number | '…')[] = [];
+  nums.forEach((n, i) => {
+    if (i > 0 && n - nums[i - 1] > 1) out.push('…');
+    out.push(n);
+  });
+  return out;
+}
+
 export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: boolean }) {
   const { profile } = useAuth();
   const [loading, setLoading] = useState(true);
-  const [parts, setParts] = useState<SparePart[]>([]);
+  // Seluruh spare part diambil SEKALI (dan setelah simpan/hapus/refresh). Pencarian & filter stok
+  // dikerjakan di klien tanpa memanggil server lagi, jadi mengetik tidak lagi memicu unduh ulang ribuan baris.
+  const [allParts, setAllParts] = useState<SparePart[]>([]);
+  const [groupNameLookup, setGroupNameLookup] = useState<Record<string, string>>({});
+  const [page, setPage] = useState(1);
   // Teks di kolom pencarian langsung berubah; query ke server memakai nilai yang sudah ditunda (debounce).
   const [searchInput, setSearchInput] = useState('');
   const search = useDebouncedValue(searchInput.trim(), 300);
@@ -133,35 +154,35 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
     // sesuai kata kunci pencarian dan filter stok.
     const all = await fetchAllRows<SparePart>('spare_parts', '*', 'name');
     if (seq !== reqSeq.current) return; // sudah ada permintaan yang lebih baru; abaikan jawaban usang
-    let filtered = all;
-
-    if (search) {
-      // Metode sama dengan pemilih spare part di Purchase Requirement: semua kata yang diketik
-      // harus cocok (urutan bebas) pada gabungan nama, kode, kode inventori, Inventory Group,
-      // kategori, dan lokasi.
-      const groupNames = groupNamesRef.current;
-      filtered = filtered.filter((p) =>
-        matchesQuery(
-          [p.name, p.code, p.inventory_code, p.group_id ? groupNames[p.group_id] : '', p.category, p.location]
-            .filter(Boolean)
-            .join(' '),
-          search
-        )
-      );
-    }
-
-    if (stockFilter === 'low') {
-      filtered = filtered.filter((p) => stockStatus(p) === 'low');
-    } else if (stockFilter === 'over') {
-      filtered = filtered.filter((p) => stockStatus(p) === 'over');
-    } else if (stockFilter === 'normal') {
-      filtered = filtered.filter((p) => stockStatus(p) === 'normal');
-    }
-
-    setParts(filtered);
+    setAllParts(all);
     setLoading(false);
     setRefreshing(false);
-  }, [search, stockFilter]);
+  }, []);
+
+  // Teks pencarian tiap part disusun sekali per pemuatan data (bukan per ketikan).
+  const haystacks = useMemo(
+    () =>
+      allParts.map((p) =>
+        [p.name, p.code, p.inventory_code, p.group_id ? groupNameLookup[p.group_id] : '', p.category, p.location]
+          .filter(Boolean)
+          .join(' ')
+      ),
+    [allParts, groupNameLookup]
+  );
+
+  const parts = useMemo(() => {
+    // Metode sama dengan pemilih spare part di Purchase Requirement: semua kata yang diketik
+    // harus cocok (urutan bebas) pada gabungan nama, kode, kode inventori, Inventory Group,
+    // kategori, dan lokasi.
+    const out: SparePart[] = [];
+    for (let i = 0; i < allParts.length; i++) {
+      const p = allParts[i];
+      if (stockFilter !== 'all' && stockStatus(p) !== stockFilter) continue;
+      if (search && !matchesQuery(haystacks[i], search)) continue;
+      out.push(p);
+    }
+    return out;
+  }, [allParts, haystacks, search, stockFilter]);
 
   useEffect(() => {
     loadParts();
@@ -180,6 +201,7 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
       setLocations((loc as PartLocation[]) ?? []);
       setGroups((grp as InventoryGroup[]) ?? []);
       groupNamesRef.current = groupNameMap((grp as InventoryGroup[]) ?? []);
+      setGroupNameLookup(groupNamesRef.current);
     }
     loadMasters();
   }, []);
@@ -404,6 +426,16 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
     });
   }, [parts, sortKey, sortDir]);
 
+  // Pencarian/filter/urutan berubah → kembali ke halaman 1.
+  useEffect(() => {
+    setPage(1);
+  }, [search, stockFilter, sortKey, sortDir]);
+
+  const totalPages = Math.max(1, Math.ceil(sortedParts.length / PAGE_SIZE));
+  // Setelah data dimuat ulang (mis. hapus item di halaman terakhir), jaga agar halaman tetap valid.
+  const currentPage = Math.min(page, totalPages);
+  const pageStart = (currentPage - 1) * PAGE_SIZE;
+
   if (loading) return <Spinner />;
 
   return (
@@ -503,7 +535,7 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {sortedParts.map((part) => {
+                {sortedParts.slice(pageStart, pageStart + PAGE_SIZE).map((part) => {
                   const status = stockStatus(part);
                   return (
                     <tr key={part.id} className="hover:bg-slate-50/60 align-top">
@@ -570,6 +602,40 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
                 })}
               </tbody>
             </table>
+            <div className="border-t border-slate-100 p-3 flex flex-col sm:flex-row items-center justify-between gap-3">
+              <p className="text-xs text-slate-500">
+                Menampilkan {pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, sortedParts.length)} dari {sortedParts.length} item
+              </p>
+              {totalPages > 1 && (
+                <nav className="flex items-center gap-1 flex-wrap justify-center" aria-label="Halaman">
+                  <Button size="sm" variant="secondary" disabled={currentPage === 1} onClick={() => setPage(currentPage - 1)}>
+                    Sebelumnya
+                  </Button>
+                  {pageList(currentPage, totalPages).map((n, i) =>
+                    n === '…' ? (
+                      <span key={`gap-${i}`} className="px-2 text-slate-400">…</span>
+                    ) : (
+                      <button
+                        key={n}
+                        type="button"
+                        onClick={() => setPage(n)}
+                        aria-current={n === currentPage ? 'page' : undefined}
+                        className={`min-w-[2rem] h-8 px-2 rounded-lg text-sm border ${
+                          n === currentPage
+                            ? 'bg-blue-600 text-white border-blue-600'
+                            : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                        }`}
+                      >
+                        {n}
+                      </button>
+                    )
+                  )}
+                  <Button size="sm" variant="secondary" disabled={currentPage === totalPages} onClick={() => setPage(currentPage + 1)}>
+                    Berikutnya
+                  </Button>
+                </nav>
+              )}
+            </div>
           </div>
         </Card>
       )}

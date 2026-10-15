@@ -1,11 +1,14 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { supabase, fetchAllRows } from '@/lib/supabase';
 import { Badge, Button, Card, EmptyState, Input, Label, Modal, Select, Spinner, Textarea } from '@/components/ui';
 import { SearchablePicker, matchesQuery } from '@/components/Pickers';
 import { groupNameMap, partPickerOption, type GroupInfo } from '@/lib/partOptions';
 import { BON_SELECT, BON_STATUS_COLORS, bonRemaining, bonStatusLabel, type Bon } from '@/lib/bons';
+import { useDebouncedValue } from '@/lib/useDebouncedValue';
 import { Pencil, Plus, RefreshCw, Search, Trash2, XCircle } from 'lucide-react';
+
+const BON_PAGE = 50;
 
 type PartOption = {
   id: string;
@@ -262,17 +265,20 @@ export default function Bons() {
   const [bons, setBons] = useState<Bon[]>([]);
   const [parts, setParts] = useState<PartOption[]>([]);
   const [groupNames, setGroupNames] = useState<Record<string, string>>({});
-  const [search, setSearch] = useState('');
+  const [searchInput, setSearchInput] = useState('');
+  const search = useDebouncedValue(searchInput.trim(), 250);
   const [status, setStatus] = useState('active');
+  const [shown, setShown] = useState(BON_PAGE);
+  const [openingForm, setOpeningForm] = useState(false);
+  const partsLoaded = useRef(false);
   const [formBon, setFormBon] = useState<Bon | 'new' | null>(null);
   const [cancelBon, setCancelBon] = useState<Bon | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setLoadError(null);
-    const [{ data: b, error }, allSp, grps] = await Promise.all([
-      supabase.from('spare_part_bons').select(BON_SELECT).order('created_at', { ascending: false }).limit(500),
+  // Daftar spare part (ribuan baris) HANYA dibutuhkan oleh form Buat/Ubah Bon, jadi baru diambil
+  // saat form dibuka (sekali), bukan setiap kali halaman Bon dibuka.
+  const loadParts = useCallback(async () => {
+    const [allSp, grps] = await Promise.all([
       fetchAllRows<PartOption>(
         'spare_parts',
         'id, code, name, unit, category, location, current_stock, inventory_code, group_id',
@@ -280,22 +286,42 @@ export default function Bons() {
       ),
       fetchAllRows<GroupInfo>('inventory_groups', 'id, name', 'name'),
     ]);
-    if (error) setLoadError(error.message);
-    setBons((b as unknown as Bon[]) ?? []);
     setParts((allSp ?? []) as PartOption[]);
     setGroupNames(groupNameMap(grps ?? []));
-    setLoading(false);
+    partsLoaded.current = true;
   }, []);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setLoadError(null);
+    // Filter status dikerjakan di server (default hanya bon aktif) agar tidak mengunduh ratusan bon lama.
+    let q = supabase.from('spare_part_bons').select(BON_SELECT).order('created_at', { ascending: false }).limit(500);
+    if (status === 'active') q = q.in('status', ['pending', 'partial']);
+    else if (status !== 'all') q = q.eq('status', status);
+    const { data: b, error } = await q;
+    if (error) setLoadError(error.message);
+    setBons((b as unknown as Bon[]) ?? []);
+    setLoading(false);
+    // Bila daftar spare part sudah pernah dimuat, segarkan (stok bisa berubah) tanpa menahan tampilan.
+    if (partsLoaded.current) void loadParts();
+  }, [status, loadParts]);
 
   useEffect(() => {
     load();
   }, [load]);
 
+  async function openForm(target: Bon | 'new') {
+    if (!partsLoaded.current) {
+      setOpeningForm(true);
+      await loadParts();
+      setOpeningForm(false);
+    }
+    setFormBon(target);
+  }
+
   const filtered = useMemo(() => {
     return bons.filter((b) => {
-      if (status === 'active' && !['pending', 'partial'].includes(b.status)) return false;
-      if (status !== 'active' && status !== 'all' && b.status !== status) return false;
-      if (!search.trim()) return true;
+      if (!search) return true;
       const hay = [
         b.bon_no,
         b.notes,
@@ -304,7 +330,12 @@ export default function Bons() {
       ].join(' ');
       return matchesQuery(hay, search);
     });
-  }, [bons, status, search]);
+  }, [bons, search]);
+
+  // Pencarian/filter berubah → kembali ke halaman pertama.
+  useEffect(() => {
+    setShown(BON_PAGE);
+  }, [filtered]);
 
   if (!profile) return null;
 
@@ -327,8 +358,8 @@ export default function Bons() {
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
           <Input
             placeholder={staff ? 'Cari no. bon, pembuat, keterangan, spare part...' : 'Cari no. bon, keterangan, spare part...'}
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
             className="pl-10"
           />
         </div>
@@ -344,8 +375,8 @@ export default function Bons() {
           <RefreshCw className="w-4 h-4" /> Refresh
         </Button>
         {canCreate && (
-          <Button onClick={() => setFormBon('new')}>
-            <Plus className="w-4 h-4" /> Buat Bon
+          <Button onClick={() => openForm('new')} disabled={openingForm}>
+            <Plus className="w-4 h-4" /> {openingForm ? 'Memuat...' : 'Buat Bon'}
           </Button>
         )}
       </div>
@@ -371,7 +402,7 @@ export default function Bons() {
         <Card><EmptyState message={status === 'active' ? 'Tidak ada bon yang sedang aktif.' : 'Tidak ada bon pada filter ini.'} /></Card>
       ) : (
         <div className="space-y-3">
-          {filtered.map((b) => (
+          {filtered.slice(0, shown).map((b) => (
             <Card key={b.id} className="p-4 space-y-3">
               <div className="flex items-start justify-between gap-3 flex-wrap">
                 <div>
@@ -383,7 +414,7 @@ export default function Bons() {
                 </div>
                 <div className="flex items-center gap-2">
                   {canEdit(b) && (
-                    <Button size="sm" variant="secondary" onClick={() => setFormBon(b)}>
+                    <Button size="sm" variant="secondary" onClick={() => openForm(b)} disabled={openingForm}>
                       <Pencil className="w-3.5 h-3.5" /> Ubah
                     </Button>
                   )}
@@ -426,6 +457,13 @@ export default function Bons() {
               )}
             </Card>
           ))}
+          {filtered.length > shown && (
+            <div className="text-center">
+              <Button size="sm" variant="secondary" onClick={() => setShown((n) => n + BON_PAGE)}>
+                Tampilkan {Math.min(BON_PAGE, filtered.length - shown)} lagi (sisa {filtered.length - shown})
+              </Button>
+            </div>
+          )}
         </div>
       )}
 

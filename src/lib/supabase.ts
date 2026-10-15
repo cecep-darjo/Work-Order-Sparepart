@@ -325,6 +325,37 @@ export async function fetchAllRows<T>(
   const chunk = 1000;
   const all: T[] = [];
   let offset = 0;
+
+  // Halaman pertama sekaligus meminta jumlah total baris. Bila total diketahui, sisa halaman diambil
+  // PARALEL (bukan berurutan) sehingga tabel besar (mis. ribuan spare part) jauh lebih cepat dimuat.
+  {
+    let q = supabase.from(table).select(select, { count: 'exact' }).order(order, { ascending });
+    if (order !== 'id') q = q.order('id', { ascending: true });
+    const { data, error, count } = await q.range(0, chunk - 1);
+    if (error) return all;
+    const rows = (data as T[]) ?? [];
+    all.push(...rows);
+    if (rows.length < chunk) return all;
+    offset = chunk;
+    if (typeof count === 'number' && count > chunk) {
+      const starts: number[] = [];
+      for (let s = chunk; s < count; s += chunk) starts.push(s);
+      const pages = await Promise.all(
+        starts.map(async (s) => {
+          let pq = supabase.from(table).select(select).order(order, { ascending });
+          if (order !== 'id') pq = pq.order('id', { ascending: true });
+          return pq.range(s, s + chunk - 1);
+        })
+      );
+      for (const pg of pages) {
+        if (pg.error) return all; // gagal sebagian → kembali data yang sudah terkumpul (berurutan)
+        all.push(...(((pg.data as T[]) ?? [])));
+      }
+      return all;
+    }
+  }
+
+  // Cadangan (total tidak diketahui): lanjut berurutan seperti semula.
   // eslint-disable-next-line no-constant-condition
   while (true) {
     let query = supabase.from(table).select(select).order(order, { ascending });

@@ -24,6 +24,25 @@ type GRLine = {
   gr_attachments: string[] | null;
   transaction_no: string | null;
   spare_part: { code: string; name: string; unit: string; inventory_code?: string | null } | null;
+  /** Baris penerimaan jasa: tidak mengubah stok, tidak bisa diedit dari sini. */
+  is_service?: boolean;
+};
+
+type ServiceReceiptRow = {
+  id: string;
+  gr_no: string;
+  gr_kind: GRKind;
+  received_qty: number;
+  reference: string | null;
+  notes: string | null;
+  gr_attachments: string[] | null;
+  created_by: string;
+  created_at: string;
+  item: {
+    spare_part_name: string;
+    uom: string | null;
+    pr: { pr_no: string | null; supplier: { name: string } | null } | null;
+  } | null;
 };
 
 type GR = {
@@ -49,7 +68,20 @@ const PAGE_SIZE = 1000;
 const LIST_STEP = 100;
 const DEFAULT_PERIOD_DAYS = 90;
 
-type SortKey = 'gr_no' | 'created_at' | 'source' | 'reference' | 'items' | 'created_by';
+type SortKey = 'gr_no' | 'created_at' | 'source' | 'reference' | 'kind' | 'items' | 'created_by';
+
+/** Jenis isi GR: hanya barang, hanya jasa, atau campuran keduanya. */
+function grItemKind(g: { lines: { is_service?: boolean }[] }): 'Barang' | 'Jasa' | 'Campuran' {
+  const svc = g.lines.filter((l) => l.is_service).length;
+  if (svc === 0) return 'Barang';
+  return svc === g.lines.length ? 'Jasa' : 'Campuran';
+}
+
+const ITEM_KIND_COLORS: Record<'Barang' | 'Jasa' | 'Campuran', string> = {
+  Barang: 'bg-slate-100 text-slate-700 border-slate-200',
+  Jasa: 'bg-violet-100 text-violet-700 border-violet-200',
+  Campuran: 'bg-amber-100 text-amber-700 border-amber-200',
+};
 
 function toDateInput(d: Date): string {
   const y = d.getFullYear();
@@ -134,6 +166,40 @@ export default function GoodsReceipts() {
       const chunk = (data as unknown as GRLine[]) ?? [];
       rows.push(...chunk);
       if (chunk.length < PAGE_SIZE) break;
+    }
+
+    // Penerimaan jasa (satu nomor GR bisa berisi barang + jasa).
+    let sq = supabase
+      .from('purchase_requirement_service_receipts')
+      .select(
+        'id, gr_no, gr_kind, received_qty, reference, notes, gr_attachments, created_by, created_at, item:purchase_requirement_items(spare_part_name, uom, pr:purchase_requirements(pr_no, supplier:inventory_suppliers(name)))'
+      )
+      .order('created_at', { ascending: false });
+    if (fromIso) sq = sq.gte('created_at', fromIso);
+    if (toIso) sq = sq.lte('created_at', toIso);
+    const { data: svcData, error: svcError } = await sq;
+    if (seq !== reqSeq.current) return;
+    if (svcError) {
+      setLoadError('Penerimaan jasa gagal dimuat: ' + svcError.message);
+    }
+    for (const r of (svcData as unknown as ServiceReceiptRow[]) ?? []) {
+      rows.push({
+        id: `svc-${r.id}`,
+        created_at: r.created_at,
+        created_by: r.created_by,
+        quantity: Number(r.received_qty),
+        stock_before: null,
+        balance_after: null,
+        gr_no: r.gr_no,
+        gr_kind: r.gr_kind,
+        source: r.item?.pr?.supplier?.name ?? null,
+        reference: r.reference ?? (r.item?.pr?.pr_no ?? null),
+        notes: r.notes,
+        gr_attachments: r.gr_attachments,
+        transaction_no: null,
+        spare_part: { code: 'JASA', name: r.item?.spare_part_name ?? 'Jasa', unit: r.item?.uom ?? '' },
+        is_service: true,
+      });
     }
 
     const { data: profs } = await supabase.from('profiles').select('id, full_name');
@@ -236,7 +302,9 @@ export default function GoodsReceipts() {
     const time = (iso: string) => new Date(iso).getTime();
     const text = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
     const textOf = (g: GR): string =>
-      key === 'created_by' ? (g.created_by ? names[g.created_by] ?? '' : '') : key === 'source' ? g.source ?? '' : g.reference ?? '';
+      key === 'created_by'
+        ? g.created_by ? names[g.created_by] ?? '' : ''
+        : key === 'source' ? g.source ?? '' : key === 'kind' ? grItemKind(g) : g.reference ?? '';
     return [...list].sort((a, b) => {
       let r = 0;
       switch (key) {
@@ -440,7 +508,8 @@ export default function GoodsReceipts() {
                   {th('Tanggal', 'created_at')}
                   {th('Sumber', 'source')}
                   {th('Referensi / PR', 'reference')}
-                  {th('Barang', 'items')}
+                  {th('Barang/Jasa', 'kind')}
+                  {th('Item', 'items')}
                   {th('Dibuat oleh', 'created_by')}
                   <th className="text-right px-4 py-3">Dokumen</th>
                 </tr>
@@ -456,7 +525,10 @@ export default function GoodsReceipts() {
                     <td className="px-4 py-3 text-xs text-slate-600">{g.source ?? '-'}</td>
                     <td className="px-4 py-3 text-xs text-slate-600 max-w-xs">{g.reference ?? '-'}</td>
                     <td className="px-4 py-3">
-                      <div className="font-medium text-slate-700">{g.lines.length} barang</div>
+                      <Badge className={ITEM_KIND_COLORS[grItemKind(g)]}>{grItemKind(g)}</Badge>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="font-medium text-slate-700">{g.lines.length} item</div>
                       <div
                         className="text-xs text-slate-400 max-w-xs truncate"
                         title={g.lines.map((l) => l.spare_part?.name).filter(Boolean).join(', ')}
@@ -549,7 +621,7 @@ export default function GoodsReceipts() {
                   {detail.lines.map((l) => (
                     <tr key={l.id}>
                       <td className="px-3 py-2">
-                        <b>{l.spare_part?.code}</b>
+                        <b>{l.is_service ? 'Jasa' : l.spare_part?.code}</b>
                         <div className="text-xs text-slate-500">{l.spare_part?.name}</div>
                       </td>
                       <td className="px-3 py-2 text-right font-medium">+{l.quantity} {l.spare_part?.unit}</td>
@@ -558,9 +630,9 @@ export default function GoodsReceipts() {
                       <td className="px-3 py-2 text-xs text-slate-500 whitespace-nowrap">{l.transaction_no ?? '-'}</td>
                       {isAdmin && (
                         <td className="px-3 py-2 text-right">
-                          <Button size="sm" variant="secondary" onClick={() => { setDetail(null); setEditTxId(l.id); }}>
+                          {!l.is_service && <Button size="sm" variant="secondary" onClick={() => { setDetail(null); setEditTxId(l.id); }}>
                             <Pencil className="w-3.5 h-3.5" /> Edit
-                          </Button>
+                          </Button>}
                         </td>
                       )}
                     </tr>

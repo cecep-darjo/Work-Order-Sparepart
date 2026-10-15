@@ -22,7 +22,7 @@ import { Search, ArrowDownToLine, ArrowUpFromLine, PackageSearch, RefreshCw, Fil
 type GRKind = 'credit' | 'cash' | 'import';
 
 /** Kunci sorting untuk daftar transaksi inventory. */
-type SortKey = 'created_at' | 'name' | 'type' | 'quantity' | 'balance_after' | 'gr_no' | 'notes';
+type SortKey = 'created_at' | 'name' | 'kind' | 'type' | 'quantity' | 'balance_after' | 'gr_no' | 'notes';
 
 /** Satu baris pada daftar pengeluaran. Baris dari bon membawa bon_item_id + batas sisa bon. */
 type IssueLine = {
@@ -48,6 +48,35 @@ type ReceiptLine = {
   pr_no: string | null;
   supplier_name: string | null;
   max: number | null;
+};
+
+/**
+ * Baris pada daftar transaksi inventory. Selain transaksi stok biasa, penerimaan JASA
+ * (tabel purchase_requirement_service_receipts) ikut ditampilkan sebagai baris Pemasukan.
+ * Baris jasa tidak mengubah stok: saldo '-' dan tidak bisa diedit dari sini.
+ */
+type TxRow = InventoryTransaction & {
+  is_service_row?: boolean;
+  service_name?: string | null;
+  service_unit?: string | null;
+  pr_no?: string | null;
+};
+
+type ServiceReceiptRow = {
+  id: string;
+  gr_no: string;
+  gr_kind: GRKind;
+  received_qty: number;
+  reference: string | null;
+  notes: string | null;
+  gr_attachments: string[] | null;
+  created_by: string;
+  created_at: string;
+  item: {
+    spare_part_name: string;
+    uom: string | null;
+    pr: { pr_no: string | null; supplier: { name: string } | null } | null;
+  } | null;
 };
 
 type RecallPR = {
@@ -90,7 +119,7 @@ export default function Transactions() {
   const { profile } = useAuth();
   const canTransact = profile?.role === 'admin' || profile?.role === 'inventory';
   const [loading, setLoading] = useState(true);
-  const [allTransactions, setAllTransactions] = useState<InventoryTransaction[]>([]);
+  const [allTransactions, setAllTransactions] = useState<TxRow[]>([]);
   const [parts, setParts] = useState<SparePart[]>([]);
   const [groupNames, setGroupNames] = useState<Record<string, string>>({});
   // Input langsung berubah; penyaringan memakai nilai tertunda (debounce) dan dilakukan di klien.
@@ -124,6 +153,8 @@ export default function Transactions() {
   const [previewGrNo, setPreviewGrNo] = useState<string | null>(null);
   const [previewingGrNo, setPreviewingGrNo] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [svcError, setSvcError] = useState<string | null>(null);
+  const [shown, setShown] = useState(100); // render bertahap: 100 baris pertama dulu agar halaman ringan
   const [editTxId, setEditTxId] = useState<string | null>(null); // admin: edit transaksi/dokumen
   const [receiptLines, setReceiptLines] = useState<ReceiptLine[]>([]);
   const [receiptPart, setReceiptPart] = useState('');
@@ -137,17 +168,52 @@ export default function Transactions() {
 
   // Data hanya diambil saat halaman dibuka / setelah transaksi (bukan pada tiap ketikan atau ganti filter).
   const load = useCallback(async () => {
-    const [allSp, grps, { data }] = await Promise.all([
+    // Daftar transaksi ditampilkan lebih dulu; ribuan spare part (untuk pemilih/filter) dimuat di latar
+    // belakang sehingga halaman tidak menunggu unduhan master part selesai.
+    void Promise.all([
       fetchAllRows<SparePart>('spare_parts', '*', 'name'),
       fetchAllRows<GroupInfo>('inventory_groups', 'id, name', 'name'),
+    ]).then(([allSp, grps]) => {
+      setParts(allSp ?? []);
+      setGroupNames(groupNameMap(grps ?? []));
+    });
+
+    const [{ data }, svcRes] = await Promise.all([
       supabase
         .from('inventory_transactions')
-        .select('*, spare_part:spare_parts(*)')
+        // Hanya kolom part yang ditampilkan di tabel (bukan seluruh kolom).
+        .select('*, spare_part:spare_parts(id, code, name, unit)')
+        .order('created_at', { ascending: false }),
+      // Penerimaan jasa (tidak menyentuh stok) ikut tampil di daftar transaksi.
+      supabase
+        .from('purchase_requirement_service_receipts')
+        .select(
+          'id, gr_no, gr_kind, received_qty, reference, notes, gr_attachments, created_by, created_at, item:purchase_requirement_items(spare_part_name, uom, pr:purchase_requirements(pr_no, supplier:inventory_suppliers(name)))'
+        )
         .order('created_at', { ascending: false }),
     ]);
-    setParts(allSp ?? []);
-    setGroupNames(groupNameMap(grps ?? []));
-    setAllTransactions((data as unknown as InventoryTransaction[]) ?? []);
+    setSvcError(svcRes.error ? svcRes.error.message : null);
+    const serviceRows: TxRow[] = ((svcRes.data as unknown as ServiceReceiptRow[]) ?? []).map((r) => ({
+      id: `svc-${r.id}`,
+      spare_part_id: '',
+      type: 'stock_in',
+      quantity: Number(r.received_qty),
+      balance_after: null,
+      reference: r.reference,
+      notes: r.notes,
+      work_order_id: null,
+      created_by: r.created_by,
+      created_at: r.created_at,
+      source: r.item?.pr?.supplier?.name ?? null,
+      gr_no: r.gr_no,
+      gr_kind: r.gr_kind,
+      gr_attachments: r.gr_attachments,
+      is_service_row: true,
+      service_name: r.item?.spare_part_name ?? 'Jasa',
+      service_unit: r.item?.uom ?? null,
+      pr_no: r.item?.pr?.pr_no ?? null,
+    }));
+    setAllTransactions([...(((data as unknown as InventoryTransaction[]) ?? []) as TxRow[]), ...serviceRows]);
     setLoading(false);
   }, []);
 
@@ -162,13 +228,16 @@ export default function Transactions() {
 
   const transactions = useMemo(() => {
     let txns = allTransactions;
-    if (typeFilter !== 'all') txns = txns.filter((t) => t.type === typeFilter);
+    if (typeFilter === 'service') txns = txns.filter((t) => t.is_service_row);
+    else if (typeFilter !== 'all') txns = txns.filter((t) => t.type === typeFilter);
     if (partFilter !== 'all') txns = txns.filter((t) => t.spare_part_id === partFilter);
     if (search) {
       const s = search.toLowerCase();
       txns = txns.filter((t) =>
         t.spare_part?.name?.toLowerCase().includes(s) ||
         t.spare_part?.code?.toLowerCase().includes(s) ||
+        (t.service_name ?? '').toLowerCase().includes(s) ||
+        (t.pr_no ?? '').toLowerCase().includes(s) ||
         (t.reference ?? '').toLowerCase().includes(s) ||
         (t.notes ?? '').toLowerCase().includes(s) ||
         (t.gr_no ?? '').toLowerCase().includes(s) ||
@@ -176,11 +245,12 @@ export default function Transactions() {
       );
     }
     // Sort kolom.
-    const get = (t: InventoryTransaction): string | number => {
+    const get = (t: TxRow): string | number => {
       switch (sort.key) {
         case 'created_at': return new Date(t.created_at).getTime();
-        case 'name': return (t.spare_part?.name ?? '').toLowerCase();
-        case 'type': return TX_TYPE_LABELS[t.type] ?? t.type;
+        case 'name': return (t.spare_part?.name ?? t.service_name ?? '').toLowerCase();
+        case 'kind': return t.is_service_row ? 'Jasa' : 'Barang';
+        case 'type': return t.is_service_row ? 'Jasa Selesai' : (TX_TYPE_LABELS[t.type] ?? t.type);
         case 'quantity': return Number(t.quantity);
         case 'balance_after': return Number(t.balance_after ?? 0);
         case 'gr_no': return t.gr_no ?? '';
@@ -196,6 +266,11 @@ export default function Transactions() {
       return 0;
     });
   }, [allTransactions, typeFilter, partFilter, search, sort]);
+
+  // Pencarian/filter/urutan berubah → kembali ke 100 baris pertama.
+  useEffect(() => {
+    setShown(100);
+  }, [transactions]);
 
   async function openReceipt() {
     setReceiptLines([]);
@@ -617,6 +692,11 @@ export default function Transactions() {
 
   return (
     <div className="space-y-4">
+      {svcError && (
+        <div className="rounded-lg border border-red-200 bg-red-50 text-red-700 text-sm px-4 py-3">
+          Penerimaan jasa gagal dimuat: {svcError}
+        </div>
+      )}
       {notice && (
         <div className="rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-800 px-4 py-3 text-sm flex items-center justify-between gap-3">
           <span>{notice}</span>
@@ -644,6 +724,7 @@ export default function Transactions() {
         <Select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} className="sm:w-44">
           <option value="all">Semua Transaksi</option>
           <option value="stock_in">Pemasukan</option>
+          <option value="service">Jasa / Service</option>
           <option value="stock_out">Pengeluaran</option>
           <option value="adjustment">Adjustment</option>
           <option value="opname">Stock Opname</option>
@@ -683,6 +764,11 @@ export default function Transactions() {
                     </button>
                   </th>
                   <th className="text-left px-4 py-3">
+                    <button type="button" onClick={() => toggleSort('kind')} className="inline-flex items-center gap-1 hover:text-slate-800">
+                      Barang/Jasa <SortIcon active={sort.key === 'kind'} dir={sort.dir} />
+                    </button>
+                  </th>
+                  <th className="text-left px-4 py-3">
                     <button type="button" onClick={() => toggleSort('type')} className="inline-flex items-center gap-1 hover:text-slate-800">
                       Jenis <SortIcon active={sort.key === 'type'} dir={sort.dir} />
                     </button>
@@ -707,7 +793,7 @@ export default function Transactions() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {transactions.map((tx) => {
+                {transactions.slice(0, shown).map((tx) => {
                   return (
                     <tr key={tx.id} className="hover:bg-slate-50">
                       <td className="px-4 py-3 text-xs text-slate-500 whitespace-nowrap">
@@ -719,9 +805,29 @@ export default function Transactions() {
                         ) : '-'}
                       </td>
                       <td className="px-4 py-3 text-xs text-slate-500 whitespace-nowrap">{new Date(tx.created_at).toLocaleString('id-ID')}</td>
-                      <td className="px-4 py-3 w-1/3 min-w-[14rem]"><b>{tx.spare_part?.name}</b><div className="text-xs text-slate-500">{tx.spare_part?.code}</div></td>
-                      <td className="px-4 py-3"><Badge className={TX_TYPE_COLORS[tx.type]}>{TX_TYPE_LABELS[tx.type]}</Badge></td>
-                      <td className="px-4 py-3 text-right font-medium">{tx.type === 'stock_out' ? '-' : tx.type === 'stock_in' ? '+' : ''}{tx.quantity} {tx.spare_part?.unit}</td>
+                      <td className="px-4 py-3 w-1/3 min-w-[14rem]">
+                        {tx.is_service_row ? (
+                          <>
+                            <b>{tx.service_name}</b>
+                            <span className="ml-1.5 inline-flex items-center rounded bg-violet-100 text-violet-700 px-1.5 py-0.5 text-[10px] font-semibold uppercase">Jasa</span>
+                            <div className="text-xs text-slate-500">{tx.pr_no ? `PR ${tx.pr_no}` : 'Tanpa stok'}</div>
+                          </>
+                        ) : (
+                          <>
+                            <b>{tx.spare_part?.name}</b>
+                            <div className="text-xs text-slate-500">{tx.spare_part?.code}</div>
+                          </>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-xs text-slate-600 whitespace-nowrap">{tx.is_service_row ? 'Jasa' : 'Barang'}</td>
+                      <td className="px-4 py-3">
+                        {tx.is_service_row ? (
+                          <Badge className="bg-violet-100 text-violet-700 border-violet-200">Jasa Selesai</Badge>
+                        ) : (
+                          <Badge className={TX_TYPE_COLORS[tx.type]}>{TX_TYPE_LABELS[tx.type]}</Badge>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-right font-medium">{tx.type === 'stock_out' ? '-' : tx.type === 'stock_in' ? '+' : ''}{tx.quantity} {tx.is_service_row ? (tx.service_unit ?? '') : tx.spare_part?.unit}</td>
                       <td className="px-4 py-3 text-right text-slate-600">{tx.balance_after ?? '-'}</td>
                       <td className="px-4 py-3 text-xs text-slate-500">{tx.reference ?? '-'}</td>
                       <td className="px-4 py-3 text-xs text-slate-500 max-w-xs">{tx.notes ?? '-'}</td>
@@ -738,7 +844,7 @@ export default function Transactions() {
                               <Paperclip className="w-3 h-3" /> Lampiran {idx + 1}
                             </a>
                           ))}
-                          {profile?.role === 'admin' && (
+                          {profile?.role === 'admin' && !tx.is_service_row && (
                             <Button size="sm" variant="secondary" onClick={() => setEditTxId(tx.id)}>
                               <Pencil className="w-4 h-4" /> Edit
                             </Button>
@@ -756,6 +862,13 @@ export default function Transactions() {
                 })}
               </tbody>
             </table>
+            {transactions.length > shown && (
+              <div className="border-t border-slate-100 p-3 text-center">
+                <Button size="sm" variant="secondary" onClick={() => setShown((n) => n + 100)}>
+                  Tampilkan {Math.min(100, transactions.length - shown)} lagi (sisa {transactions.length - shown})
+                </Button>
+              </div>
+            )}
           </div>
         )}
       </Card>
