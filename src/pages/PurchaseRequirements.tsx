@@ -6,7 +6,7 @@ import { Badge, Button, Card, Input, Label, Modal, Select, Spinner, Textarea } f
 import { SearchablePicker, type PickerOption } from '@/components/Pickers';
 import { groupNameMap, partPickerOption, type GroupInfo } from '@/lib/partOptions';
 import type { PageKey } from '@/components/Layout';
-import { ClipboardCheck, Paperclip, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-react';
+import { ChevronDown, ChevronUp, ClipboardCheck, Paperclip, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-react';
 
 type PurchaseRequirementStatus = 'pending_numbering' | 'numbered';
 
@@ -74,6 +74,11 @@ const STATUS_COLORS: Record<PurchaseRequirementStatus, string> = {
   numbered: 'bg-emerald-100 text-emerald-700 border-emerald-200',
 };
 
+const STATUS_SHADE_COLORS: Record<PurchaseRequirementStatus, string> = {
+  pending_numbering: 'border-l-amber-400',
+  numbered: 'border-l-emerald-400',
+};
+
 const MAX_PR_FILE_SIZE = 5 * 1024 * 1024;
 const ALLOWED_PR_MIME = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
 
@@ -129,12 +134,14 @@ async function uploadAttachmentFiles(prId: string, files: File[]): Promise<strin
 }
 
 function PrItemsList({ row }: { row: PurchaseRequirement }) {
+  const [showAll, setShowAll] = useState(false);
   const items = [...(row.items ?? [])].sort((a, b) => a.spare_part_name.localeCompare(b.spare_part_name));
+  const visibleItems = showAll ? items : items.slice(0, 1);
   const showProgress = row.status === 'numbered';
   if (items.length === 0) return <p className="text-xs text-slate-400">Tidak ada item.</p>;
   return (
     <div className="rounded-lg bg-slate-50 divide-y divide-slate-100">
-      {items.map((it) => {
+      {visibleItems.map((it) => {
         const unit = it.is_service ? (it.uom ?? 'vol.') : (it.spare_part?.unit ?? '');
         const complete = Number(it.received_qty) >= Number(it.quantity);
         return (
@@ -163,6 +170,20 @@ function PrItemsList({ row }: { row: PurchaseRequirement }) {
           </div>
         );
       })}
+      {items.length > 1 && (
+        <button
+          type="button"
+          onClick={() => setShowAll((current) => !current)}
+          aria-expanded={showAll}
+          className="flex w-full items-center justify-center gap-1 px-3 py-2 text-xs font-medium text-blue-600 hover:bg-slate-100"
+        >
+          {showAll ? (
+            <><ChevronUp className="h-3.5 w-3.5" /> Tampilkan lebih sedikit</>
+          ) : (
+            <><ChevronDown className="h-3.5 w-3.5" /> Tampilkan {items.length - 1} item lainnya</>
+          )}
+        </button>
+      )}
     </div>
   );
 }
@@ -261,7 +282,7 @@ export function PurchaseRequirementsInbox({
           {rows.map((row) => {
             const draft = drafts[row.id] ?? { sap_no: '', pr_no: currentPrPrefix() };
             return (
-              <div key={row.id} className="rounded-lg border border-slate-200 p-3 space-y-3">
+              <div key={row.id} className={`rounded-lg border border-slate-200 border-l-4 ${STATUS_SHADE_COLORS[row.status]} p-3 space-y-3`}>
                 <div className="flex items-center justify-between gap-2 flex-wrap">
                   <div>
                     <p className="text-sm font-semibold text-slate-900">{(row.items ?? []).length} item spare part</p>
@@ -328,6 +349,7 @@ function EditPrModal({
   row,
   parts,
   partOptions,
+  groupNames,
   requesters,
   suppliers,
   units,
@@ -338,6 +360,7 @@ function EditPrModal({
   row: PurchaseRequirement;
   parts: PartOption[];
   partOptions: PickerOption[];
+  groupNames: Record<string, string>;
   requesters: Profile[];
   suppliers: { id: string; code: string; name: string }[];
   units: string[];
@@ -638,7 +661,7 @@ function EditPrModal({
                     <div className="min-w-0">
                       <p className="text-sm font-medium text-slate-900 truncate">{part?.name}</p>
                       <p className="text-xs text-slate-400">
-                        {part?.code}
+                        {[part?.inventory_code, part?.group_id ? groupNames[part.group_id] : ''].filter(Boolean).join(' • ') || part?.code}
                         {rec > 0 && <span className="ml-1 text-emerald-600">• sudah diterima {rec} (qty minimal {rec})</span>}
                       </p>
                     </div>
@@ -1151,7 +1174,10 @@ export default function PurchaseRequirements() {
                       <div key={i.spare_part_id} className="flex items-center justify-between gap-3 px-3 py-2">
                         <div className="min-w-0">
                           <p className="text-sm font-medium text-slate-900 truncate">{part?.name}</p>
-                          <p className="text-xs text-slate-400">{part?.code} • stok {part?.current_stock} {part?.unit}</p>
+                          <p className="text-xs text-slate-400">
+                            {[part?.inventory_code, part?.group_id ? groupNames[part.group_id] : ''].filter(Boolean).join(' • ') || part?.code}
+                            {' • '}stok {part?.current_stock} {part?.unit}
+                          </p>
                         </div>
                         <div className="flex items-center gap-2 flex-shrink-0">
                           <Input
@@ -1355,7 +1381,7 @@ export default function PurchaseRequirements() {
               const draft = numbering[row.id] ?? { sap_no: '', pr_no: currentPrPrefix() };
               const canFill = canNumber && row.status === 'pending_numbering';
               return (
-                <div key={row.id} className="rounded-lg border border-slate-200 p-4 space-y-3">
+                <div key={row.id} className={`rounded-lg border border-slate-200 border-l-4 ${STATUS_SHADE_COLORS[row.status]} p-4 space-y-3`}>
                   <div className="flex items-start justify-between gap-3 flex-wrap">
                     <div>
                       <p className="text-sm font-semibold text-slate-900">{(row.items ?? []).length} item spare part</p>
@@ -1451,6 +1477,7 @@ export default function PurchaseRequirements() {
           row={editingRow}
           parts={parts}
           partOptions={partOptions}
+          groupNames={groupNames}
           requesters={requesters}
           suppliers={suppliers}
           units={units}

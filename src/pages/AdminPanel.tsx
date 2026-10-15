@@ -49,7 +49,9 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
   const [units, setUnits] = useState<UnitOfMeasure[]>([]);
   const [locations, setLocations] = useState<PartLocation[]>([]);
   const [suppliers, setSuppliers] = useState<InventorySupplier[]>([]);
+  const [supplierSort, setSupplierSort] = useState<'name-asc' | 'name-desc' | 'code-asc' | 'code-desc'>('name-asc');
   const [groups, setGroups] = useState<InventoryGroup[]>([]);
+  const [latestGrNumbers, setLatestGrNumbers] = useState<Record<GRKind, string | null>>({ credit: null, cash: null, import: null });
   const [grForm, setGrForm] = useState<Record<GRKind, number>>({ credit: 1, cash: 1, import: 1 });
 
   const [showForm, setShowForm] = useState(false);
@@ -91,19 +93,33 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
       setEquipment((e as unknown as (Equipment & { area?: Area })[]) ?? []);
       setUsers((u as Profile[]) ?? []);
     } else {
-      const [{ data: cat }, { data: un }, { data: loc }, sup, { data: gr }, { data: groupsData }] = await Promise.all([
+      const [{ data: cat }, { data: un }, { data: loc }, sup, { data: gr }, { data: groupsData }, { data: transactions }, { data: serviceReceipts }] = await Promise.all([
         supabase.from('part_categories').select('*').order('name'),
         supabase.from('units_of_measure').select('*').order('name'),
         supabase.from('part_locations').select('*').order('name'),
         fetchAllRows<InventorySupplier>('inventory_suppliers', '*', 'name'),
         supabase.rpc('get_gr_start_numbers'),
         supabase.from('inventory_groups').select('*').order('name'),
+        supabase.from('inventory_transactions').select('gr_no, gr_kind, created_at').not('gr_no', 'is', null).order('created_at', { ascending: false }).limit(1000),
+        supabase.from('purchase_requirement_service_receipts').select('gr_no, gr_kind, created_at').order('created_at', { ascending: false }).limit(1000),
       ]);
       setCategories((cat as PartCategory[]) ?? []);
       setUnits((un as UnitOfMeasure[]) ?? []);
       setLocations((loc as PartLocation[]) ?? []);
       setSuppliers(sup);
       setGroups((groupsData as InventoryGroup[]) ?? []);
+
+      const latest: Record<GRKind, { gr_no: string; created_at: string } | null> = { credit: null, cash: null, import: null };
+      for (const receipt of [...(transactions ?? []), ...(serviceReceipts ?? [])] as { gr_no: string | null; gr_kind: GRKind | null; created_at: string }[]) {
+        if (!receipt.gr_no || !receipt.gr_kind || !['credit', 'cash', 'import'].includes(receipt.gr_kind)) continue;
+        const current = latest[receipt.gr_kind];
+        if (!current || receipt.created_at > current.created_at) latest[receipt.gr_kind] = { gr_no: receipt.gr_no, created_at: receipt.created_at };
+      }
+      setLatestGrNumbers({
+        credit: latest.credit?.gr_no ?? null,
+        cash: latest.cash?.gr_no ?? null,
+        import: latest.import?.gr_no ?? null,
+      });
 
       const next: Record<GRKind, number> = { credit: 1, cash: 1, import: 1 };
       ((gr as { gr_kind: GRKind; start_no: number }[] | null) ?? []).forEach((r) => {
@@ -495,9 +511,28 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
 
         {(tab === 'categories' || tab === 'units' || tab === 'locations' || tab === 'suppliers') && (() => {
           const list = tab === 'categories' ? categories : tab === 'units' ? units : tab === 'locations' ? locations : suppliers;
+          const supplierList = tab === 'suppliers'
+            ? [...suppliers].sort((a, b) => {
+                const [field, direction] = supplierSort.split('-') as ['name' | 'code', 'asc' | 'desc'];
+                const result = a[field].localeCompare(b[field], 'id', { sensitivity: 'base', numeric: true });
+                return direction === 'asc' ? result : -result;
+              })
+            : null;
+          const displayList = supplierList ?? list;
           return (
             <div className="space-y-2">
-              {list.map((m) => (
+              {tab === 'suppliers' && (
+                <div className="flex items-center justify-between gap-3 pb-1">
+                  <span className="text-sm text-slate-500">Urutkan supplier</span>
+                  <Select value={supplierSort} onChange={(e) => setSupplierSort(e.target.value as typeof supplierSort)} className="w-auto min-w-44">
+                    <option value="name-asc">Nama (A–Z)</option>
+                    <option value="name-desc">Nama (Z–A)</option>
+                    <option value="code-asc">Kode (kecil–besar)</option>
+                    <option value="code-desc">Kode (besar–kecil)</option>
+                  </Select>
+                </div>
+              )}
+              {displayList.map((m) => (
                 <div key={m.id} className="flex items-center justify-between p-3 rounded-lg bg-slate-50">
                   <div>
                     <p className="text-sm font-medium text-slate-900">{m.name}</p>
@@ -559,6 +594,9 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
                     disabled={!canEditGrStart || acting}
                     onChange={(e) => setGrForm((prev) => ({ ...prev, [kind]: Number(e.target.value || 1) }))}
                   />
+                  <p className="mt-1 text-xs text-slate-500">
+                    Nomor GR terakhir: <span className="font-medium text-slate-700">{latestGrNumbers[kind] ?? 'Belum ada GR'}</span>
+                  </p>
                 </div>
               ))}
             </div>
