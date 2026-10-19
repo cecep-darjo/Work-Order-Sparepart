@@ -1,5 +1,5 @@
 import { uuid } from '@/lib/uuid';
-import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import {
   supabase,
@@ -60,6 +60,8 @@ export default function WorkOrderDetail({
   onBack: () => void;
 }) {
   const { profile } = useAuth();
+  const woGalleryInputRef = useRef<HTMLInputElement>(null);
+  const woCameraInputRef = useRef<HTMLInputElement>(null);
   const [loading, setLoading] = useState(true);
   const [wo, setWo] = useState<WorkOrder | null>(null);
   const [history, setHistory] = useState<WorkOrderHistory[]>([]);
@@ -76,8 +78,6 @@ export default function WorkOrderDetail({
 
   // Action form state
   const [analysis, setAnalysis] = useState('');
-  const [actionTaken, setActionTaken] = useState('');
-  const [result, setResult] = useState('');
   const [pendingReason, setPendingReason] = useState('');
   const [selectedPart, setSelectedPart] = useState('');
   const [partQty, setPartQty] = useState(1);
@@ -125,8 +125,6 @@ export default function WorkOrderDetail({
       .maybeSingle();
     setWo(woData as unknown as WorkOrder);
     setAnalysis(woData?.analysis ?? '');
-    setActionTaken(woData?.action_taken ?? '');
-    setResult(woData?.result ?? '');
     setPendingReason(woData?.pending_reason ?? '');
 
     setHistory(await fetchWoHistory(woId));
@@ -146,13 +144,16 @@ export default function WorkOrderDetail({
     setRequests((reqData as unknown as PartRequest[]) ?? []);
 
     const [{ data: techs }, { data: spvs }, allSp, { data: grp }] = await Promise.all([
-      supabase.from('profiles').select('*').eq('role', 'teknisi').eq('is_active', true).order('full_name'),
+      supabase.from('profiles').select('*, department_assignments:profile_departments(department_id)').eq('role', 'teknisi').eq('is_active', true).order('full_name'),
       supabase.from('profiles').select('*').in('role', ['spv', 'ss']).eq('is_active', true).order('full_name'),
       fetchAllRows<SparePart>('spare_parts', '*', 'name'),
       supabase.from('inventory_groups').select('*').order('name'),
     ]);
     setGroups((grp as InventoryGroup[]) ?? []);
-    setTechList((techs as Profile[]) ?? []);
+    setTechList(((techs ?? []) as unknown as (Profile & { department_assignments?: { department_id: string }[] })[]).map((tech) => ({
+      ...tech,
+      department_ids: [...new Set([...(tech.department_assignments ?? []).map((d) => d.department_id), ...(tech.department_id ? [tech.department_id] : [])])],
+    })));
     setSpvList((spvs as Profile[]) ?? []);
     setSpareParts((allSp ?? []) as SparePart[]);
     setAssignTechs(woTechnicians(woData as unknown as WorkOrder).map((t) => t.id));
@@ -662,15 +663,18 @@ export default function WorkOrderDetail({
 
   const isAdmin = profile?.role === 'admin' || profile?.role === 'ss';
   const needEditReason = profile?.role === 'admin' && ['done', 'verified', 'closed'].includes(wo.status);
-  const isSPV = profile?.role === 'spv' && (profile?.department_id === wo.department_id || wo.spv_id === profile?.id);
+  const isSPV = profile?.role === 'spv' && (profile?.department_ids?.includes(wo.department_id) || profile?.department_id === wo.department_id || wo.spv_id === profile?.id);
   const canGenerateReport = profile?.role === 'spv' || profile?.role === 'ss' || profile?.role === 'admin';
   const assignedTechs = woTechnicians(wo);
   const isTech = profile?.role === 'teknisi' && assignedTechs.some((t) => t.id === profile.id);
   const canUploadWoPhoto = isTech || isSPV;
   const isCanceled = wo.status === 'canceled';
   // Teknisi yang sudah ditugaskan tetap muncul di pilihan walau nonaktif.
+  const scopedTechList = profile?.role === 'admin'
+    ? techList
+    : techList.filter((tech) => tech.department_id === wo.department_id || tech.department_ids?.includes(wo.department_id));
   const techOptions = (
-    [...techList, ...assignedTechs.filter((a) => !techList.some((t) => t.id === a.id))]
+    [...scopedTechList, ...assignedTechs.filter((a) => !scopedTechList.some((t) => t.id === a.id))]
   ).map((t) => ({ value: t.id, label: t.full_name, sublabel: t.username ? `@${t.username}` : undefined }));
   const groupName = (p: SparePart) => groups.find((g) => g.id === p.group_id)?.name ?? '';
   const groupNames = groupNameMap(groups);
@@ -718,6 +722,7 @@ export default function WorkOrderDetail({
           <InfoRow label="Dept. Peminta" value={wo.requester_department || '-'} />
           <InfoRow label="Area" value={wo.area?.name ?? '-'} />
           <InfoRow label="Equipment" value={wo.equipment?.name ?? '-'} />
+          <InfoRow label="Jobs Assignment" value={wo.job_assignment ? `${wo.job_assignment.job_no} · ${wo.job_assignment.title}` : '-'} />
           <InfoRow label="Mulai Dikerjakan" value={fmtWoTime(workTimes.startedAt)} />
           <InfoRow label="Selesai" value={fmtWoTime(workTimes.finishedAt)} />
           <InfoRow label="Date Created" value={new Date(wo.date_created).toLocaleDateString()} />
@@ -728,6 +733,12 @@ export default function WorkOrderDetail({
           <p className="text-xs text-slate-400 mb-1">Problem Description</p>
           <p className="text-sm text-slate-700">{wo.problem_description}</p>
         </div>
+      {(wo.analysis || wo.action_taken || wo.result) && (
+          <div className="rounded-lg border border-blue-100 bg-blue-50/60 p-3">
+            <p className="text-xs font-medium text-blue-700 mb-1">Uraian Pekerjaan</p>
+            <p className="text-sm text-slate-700 whitespace-pre-wrap">{[wo.analysis, wo.action_taken, wo.result].filter(Boolean).join('\n\n')}</p>
+          </div>
+        )}
       </Card>
 
       {/* Lampiran foto WO */}
@@ -760,6 +771,7 @@ export default function WorkOrderDetail({
           {canUploadWoPhoto && wo.status !== 'closed' && wo.status !== 'canceled' && (
             <div className="space-y-3">
               <input
+                ref={woGalleryInputRef}
                 type="file"
                 accept="image/jpeg,image/png,image/webp"
                 multiple
@@ -767,8 +779,27 @@ export default function WorkOrderDetail({
                   handlePickWoPhotoFiles(e.target.files);
                   e.currentTarget.value = '';
                 }}
-                className="block w-full text-sm text-slate-600 file:mr-3 file:px-3 file:py-2 file:rounded-md file:border-0 file:bg-slate-100 file:text-slate-700 hover:file:bg-slate-200"
+                className="hidden"
               />
+              <input
+                ref={woCameraInputRef}
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                capture="environment"
+                onChange={(e) => {
+                  handlePickWoPhotoFiles(e.target.files);
+                  e.currentTarget.value = '';
+                }}
+                className="hidden"
+              />
+              <div className="flex flex-wrap gap-2">
+                <Button variant="secondary" onClick={() => woCameraInputRef.current?.click()}>
+                  <ImagePlus className="w-4 h-4" /> Ambil Foto
+                </Button>
+                <Button variant="secondary" onClick={() => woGalleryInputRef.current?.click()}>
+                  <ImagePlus className="w-4 h-4" /> Pilih dari Galeri
+                </Button>
+              </div>
 
               {woPhotoFiles.length > 0 && (
                 <div className="rounded-lg bg-slate-50 divide-y divide-slate-100">
@@ -845,38 +876,20 @@ export default function WorkOrderDetail({
           <h3 className="font-semibold text-slate-900">Work Execution</h3>
 
           {wo.status === 'assigned' && (
-            <Button variant="primary" onClick={() => updateStatus('analysis', 'Started analysis')} disabled={acting}>
-              <Play className="w-4 h-4" /> Start Analysis
+            <Button variant="primary" onClick={() => updateStatus('analysis', 'Started work')} disabled={acting}>
+              <Play className="w-4 h-4" /> Mulai Pekerjaan
             </Button>
           )}
 
           {(wo.status === 'analysis' || wo.status === 'on_progress' || wo.status === 'pending') && (
             <>
               <div>
-                <Label>Analysis</Label>
+                <Label>Uraian Pekerjaan</Label>
                 <Textarea
-                  rows={3}
+                  rows={5}
                   value={analysis}
                   onChange={(e) => setAnalysis(e.target.value)}
-                  placeholder="Describe your analysis of the problem..."
-                />
-              </div>
-              <div>
-                <Label>Action Taken</Label>
-                <Textarea
-                  rows={3}
-                  value={actionTaken}
-                  onChange={(e) => setActionTaken(e.target.value)}
-                  placeholder="Describe actions taken..."
-                />
-              </div>
-              <div>
-                <Label>Result</Label>
-                <Textarea
-                  rows={2}
-                  value={result}
-                  onChange={(e) => setResult(e.target.value)}
-                  placeholder="Describe the result..."
+                  placeholder="Ceritakan pekerjaan yang dilakukan, temuan, dan kondisi akhir..."
                 />
               </div>
 
@@ -890,13 +903,19 @@ export default function WorkOrderDetail({
               </div>
 
               <div className="flex flex-wrap gap-2">
+                <Button
+                  variant="secondary"
+                  onClick={() => updateStatus(wo.status, 'Work description updated', { analysis }, 'Uraian pekerjaan diperbarui')}
+                  disabled={acting}
+                >
+                  Simpan Uraian
+                </Button>
                 {wo.status !== 'on_progress' && (
                   <Button
                     variant="primary"
                     onClick={() =>
                       updateStatus('on_progress', 'Started work', {
                         analysis,
-                        action_taken: actionTaken,
                       })
                     }
                     disabled={acting}
@@ -911,7 +930,7 @@ export default function WorkOrderDetail({
                       alert('Please enter a pending reason');
                       return;
                     }
-                    updateStatus('pending', 'Set to pending', { pending_reason: pendingReason.trim() });
+                    updateStatus('pending', 'Set to pending', { pending_reason: pendingReason.trim(), analysis });
                   }}
                   disabled={acting}
                 >
@@ -920,7 +939,7 @@ export default function WorkOrderDetail({
                 {wo.status === 'pending' && pendingReason && (
                   <Button
                     variant="primary"
-                    onClick={() => updateStatus('on_progress', 'Resumed from pending')}
+                    onClick={() => updateStatus('on_progress', 'Resumed from pending', { analysis })}
                     disabled={acting}
                   >
                     <Play className="w-4 h-4" /> Resume Work
@@ -931,8 +950,8 @@ export default function WorkOrderDetail({
                   onClick={() =>
                     updateStatus('done', 'Work completed', {
                       analysis,
-                      action_taken: actionTaken,
-                      result,
+                      action_taken: null,
+                      result: null,
                     })
                   }
                   disabled={acting}

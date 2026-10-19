@@ -16,6 +16,7 @@ import { SearchablePicker, type PickerOption } from '@/components/Pickers';
 import { groupNameMap, partPickerOption, type GroupInfo } from '@/lib/partOptions';
 import EditTransactionModal from '@/components/EditTransactionModal';
 import { BON_SELECT, bonRemaining, type Bon, type BonItem } from '@/lib/bons';
+import { PR_SELECT, downloadIssueSlip, insufficientItems, type PartRequest } from '@/lib/partRequests';
 import { printIssueSlipByNo, printLegacyIssue } from '@/lib/manualIssue';
 import { Search, ArrowDownToLine, ArrowUpFromLine, PackageSearch, RefreshCw, FileDown, Plus, Trash2, Paperclip, ClipboardCheck, Pencil, ArrowUp, ArrowDown, ArrowUpDown } from 'lucide-react';
 
@@ -139,6 +140,9 @@ export default function Transactions() {
   const [issueItems, setIssueItems] = useState<IssueLine[]>([]);
   const [openBons, setOpenBons] = useState<Bon[]>([]);
   const [loadingBons, setLoadingBons] = useState(false);
+  const [openWoRequests, setOpenWoRequests] = useState<PartRequest[]>([]);
+  const [loadingWoRequests, setLoadingWoRequests] = useState(false);
+  const [processingWoRequest, setProcessingWoRequest] = useState<string | null>(null);
   const [bonRequester, setBonRequester] = useState('');
   // Nilai Referensi/Keperluan yang terisi otomatis dari bon (supaya tidak menimpa ketikan manual user)
   const [issueAuto, setIssueAuto] = useState({ notes: '', reference: '' });
@@ -149,7 +153,7 @@ export default function Transactions() {
   const [stockCardPart, setStockCardPart] = useState<SparePart | null>(null);
   const [stockCard, setStockCard] = useState<InventoryTransaction[]>([]);
   const [grFiles, setGrFiles] = useState<File[]>([]);
-  // Perkiraan nomor GR berikutnya (hanya tampilan; nomor sebenarnya diambil server saat pemasukan disimpan).
+  // Nomor GR untuk pemasukan; dapat diisi dari generator atau diedit manual sebelum disimpan.
   const [previewGrNo, setPreviewGrNo] = useState<string | null>(null);
   const [previewingGrNo, setPreviewingGrNo] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -277,6 +281,7 @@ export default function Transactions() {
     setReceiptPart('');
     setReceiptQty(1);
     setReceiptForm({ gr_kind: 'credit', source: '', reference: '', notes: '' });
+    setPreviewGrNo(null);
     setGrFiles([]);
     setPreviewGrNo(null);
     setRecallRequester('');
@@ -479,7 +484,7 @@ export default function Transactions() {
             : { spare_part_id: l.spare_part_id, quantity: l.quantity, pr_item_id: l.pr_item_id }
         ),
         p_gr_kind: receiptForm.gr_kind,
-        p_gr_no: null, // nomor final dibuat server di dalam transaksi simpan
+        p_gr_no: previewGrNo?.trim() || null, // gunakan nomor manual/generator; kosong = otomatis di server
         p_source: source || null,
         p_reference: reference || null,
         p_notes: receiptForm.notes.trim() || null,
@@ -490,10 +495,7 @@ export default function Transactions() {
         return;
       }
       const finalNo = String(data ?? '');
-      setNotice(
-        `Pemasukan tersimpan dengan No. GR ${finalNo}` +
-          (previewGrNo && previewGrNo !== finalNo ? ` (berbeda dari perkiraan ${previewGrNo} karena nomor itu sudah dipakai penerimaan lain).` : '.')
-      );
+      setNotice(`Pemasukan tersimpan dengan No. GR ${finalNo}.`);
       setShowReceipt(false);
       setReceiptLines([]);
       setGrFiles([]);
@@ -513,6 +515,8 @@ export default function Transactions() {
     setIssueForm({ recipient: '', destination: '', reference: '', notes: '' });
     setBonRequester('');
     setOpenBons([]);
+    setOpenWoRequests([]);
+    setLoadingWoRequests(true);
     setIssueAuto({ notes: '', reference: '' });
     setShowIssue(true);
 
@@ -525,6 +529,43 @@ export default function Transactions() {
       .order('created_at', { ascending: true });
     setOpenBons(((data as unknown as Bon[]) ?? []).filter((b) => b.items.some((i) => bonRemaining(i) > 0)));
     setLoadingBons(false);
+
+    const { data: woRequests, error: woRequestError } = await supabase
+      .from('wo_part_requests')
+      .select(PR_SELECT)
+      .eq('status', 'ss_approved')
+      .order('requested_at', { ascending: true });
+    if (woRequestError) {
+      setNotice(`Permintaan part WO gagal dimuat: ${woRequestError.message}`);
+      setOpenWoRequests([]);
+    } else {
+      setOpenWoRequests((woRequests as unknown as PartRequest[]) ?? []);
+    }
+    setLoadingWoRequests(false);
+  }
+
+  async function processWoRequest(request: PartRequest) {
+    const short = insufficientItems(request);
+    if (short.length > 0) {
+      alert(`Stok tidak cukup untuk: ${short.map((item) => item.spare_part?.name ?? 'spare part').join(', ')}.`);
+      return;
+    }
+    setProcessingWoRequest(request.id);
+    const { error } = await supabase.rpc('process_part_request', { p_request_id: request.id });
+    if (error) {
+      alert('Gagal proses pengeluaran WO: ' + error.message);
+      setProcessingWoRequest(null);
+      return;
+    }
+    try {
+      await downloadIssueSlip({ ...request, status: 'approved' });
+    } catch (e) {
+      alert('Pengeluaran berhasil, tetapi bukti PDF gagal dibuat: ' + (e instanceof Error ? e.message : String(e)));
+    }
+    setOpenWoRequests((current) => current.filter((item) => item.id !== request.id));
+    setNotice(`Permintaan WO ${request.request_no} berhasil dikeluarkan dan dicatat sebagai transaksi stock out.`);
+    setProcessingWoRequest(null);
+    await load();
   }
 
   const bonRequesters = useMemo(() => {
@@ -935,14 +976,18 @@ export default function Transactions() {
           <div className="rounded-lg border border-slate-200 p-3 space-y-2">
             <div className="flex flex-col sm:flex-row gap-2 sm:items-end">
               <div className="flex-1">
-                <Label>Nomor GR (perkiraan)</Label>
-                <Input value={previewGrNo ?? ''} placeholder="Otomatis dibuat saat disimpan" readOnly className="bg-slate-50" />
+                <Label>Nomor GR</Label>
+                <Input
+                  value={previewGrNo ?? ''}
+                  onChange={(e) => setPreviewGrNo(e.target.value)}
+                  placeholder="Generate atau masukkan nomor GR manual"
+                />
               </div>
               <Button type="button" variant="secondary" onClick={previewGrNumber} disabled={acting || previewingGrNo}>
                 {previewingGrNo ? 'Memuat...' : 'Generate No. GR'}
               </Button>
             </div>
-            <p className="text-xs text-slate-400">Generate hanya menampilkan perkiraan nomor. Nomor baru tersimpan/terpakai saat pemasukan disimpan, dan bisa berbeda jika ada penerimaan lain yang tersimpan lebih dulu.</p>
+            <p className="text-xs text-slate-400">Nomor hasil generate bisa diedit manual. Nomor diperiksa saat disimpan; jika sudah dipakai penerimaan lain, simpan akan ditolak. Kosongkan kolom untuk memakai nomor otomatis.</p>
           </div>
 
           {/* Recall dari PR */}
@@ -1206,6 +1251,55 @@ export default function Transactions() {
               </>
             )}
             <p className="text-xs text-slate-400">Penerima yang tidak punya user (bukan pembuat bon) tetap bisa diisi manual: isi nama penerima dan tambahkan barang di bawah.</p>
+          </div>
+
+          {/* Permintaan spare part WO yang sudah disetujui dan siap dikeluarkan. */}
+          <div className="rounded-lg border border-blue-200 bg-blue-50/40 p-3 space-y-3">
+            <div className="flex items-center gap-2 text-sm font-semibold text-slate-800">
+              <PackageSearch className="w-4 h-4 text-blue-600" /> Panggil dari Permintaan WO
+            </div>
+            {loadingWoRequests ? (
+              <p className="text-sm text-slate-400">Memuat permintaan WO...</p>
+            ) : openWoRequests.length === 0 ? (
+              <p className="text-sm text-slate-400">Tidak ada permintaan WO yang sudah disetujui dan menunggu pengeluaran.</p>
+            ) : (
+              <div className="space-y-2">
+                {openWoRequests.map((request) => {
+                  const short = insufficientItems(request);
+                  return (
+                    <div key={request.id} className="rounded-lg bg-white border border-slate-200 p-3 space-y-2">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-sm font-semibold text-slate-900">{request.request_no} · {request.work_order?.wo_number ?? 'WO'}</p>
+                          <p className="text-xs text-slate-500">{request.requester?.full_name ?? 'Peminta tidak diketahui'} · {request.purpose}</p>
+                        </div>
+                        <Button
+                          size="sm"
+                          variant="success"
+                          disabled={processingWoRequest !== null || short.length > 0}
+                          onClick={() => processWoRequest(request)}
+                        >
+                          <ArrowUpFromLine className="w-4 h-4" />
+                          {processingWoRequest === request.id ? 'Memproses...' : 'Proses Pengeluaran'}
+                        </Button>
+                      </div>
+                      <div className="rounded-md bg-slate-50 divide-y divide-slate-100">
+                        {(request.items ?? []).map((item) => (
+                          <div key={item.id} className="flex items-center justify-between gap-3 px-2 py-1.5 text-xs">
+                            <span className="min-w-0 truncate text-slate-700">{item.spare_part?.name ?? item.spare_part_id}</span>
+                            <span className="shrink-0 text-slate-500">{item.quantity} {item.spare_part?.unit} · stok {item.spare_part?.current_stock ?? 0}</span>
+                          </div>
+                        ))}
+                      </div>
+                      {short.length > 0 && (
+                        <p className="text-xs text-red-600">Stok belum cukup untuk: {short.map((item) => item.spare_part?.name ?? 'spare part').join(', ')}.</p>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            <p className="text-xs text-slate-400">Proses ini memakai jumlah permintaan yang disetujui, mengurangi stok, menghubungkan transaksi ke WO, dan membuat bukti pengeluaran.</p>
           </div>
 
           <div className="rounded-lg border border-slate-200 p-3 space-y-3">

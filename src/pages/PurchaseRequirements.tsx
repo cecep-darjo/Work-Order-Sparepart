@@ -896,7 +896,7 @@ export default function PurchaseRequirements() {
   // nama Inventory Group; kode part, kategori, dan lokasi tetap ikut dicari.
   const partOptions = useMemo<PickerOption[]>(() => parts.map((p) => partPickerOption(p, groupNames)), [parts, groupNames]);
 
-  const canCreate = profile?.role === 'admin' || profile?.role === 'ss';
+  const canCreate = profile?.role === 'admin' || profile?.role === 'ss' || profile?.role === 'inventory';
   const canNumber = profile?.role === 'admin' || profile?.role === 'inventory';
 
   const filteredRows = useMemo(() => {

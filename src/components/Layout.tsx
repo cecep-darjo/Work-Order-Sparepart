@@ -19,6 +19,7 @@ import {
   ClipboardCheck,
   PenLine,
   HardHat,
+  UserRound,
 } from 'lucide-react';
 
 export type PageKey =
@@ -33,6 +34,7 @@ export type PageKey =
   | 'purchase_requirements'
   | 'master_wo'
   | 'master_inventory'
+  | 'user_settings'
   | 'activity';
 
 const NAV_ITEMS: {
@@ -52,6 +54,7 @@ const NAV_ITEMS: {
   { key: 'purchase_requirements', label: 'Purchase Requirements', icon: Package, roles: ['admin', 'ss', 'inventory'] },
   { key: 'master_wo', label: 'Master Data WO', icon: Settings, roles: ['admin', 'ss'] },
   { key: 'master_inventory', label: 'Master Data Inventory', icon: Settings, roles: ['admin', 'ss', 'inventory'] },
+  { key: 'user_settings', label: 'User Settings', icon: UserRound, roles: ['admin', 'ss', 'spv', 'teknisi', 'inventory'] },
   { key: 'activity', label: 'Activity Log', icon: History, roles: ['admin'] },
 ];
 

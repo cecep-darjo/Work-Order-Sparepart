@@ -18,6 +18,7 @@ import {
 } from '@/lib/supabase';
 import { normalizeUsername, validatePassword, validateUsername } from '@/lib/authUsername';
 import { Card, Badge, Button, Input, Select, Label, Modal, Spinner } from '@/components/ui';
+import { MultiPicker } from '@/components/Pickers';
 import { Building2, MapPin, Cpu, Users, Plus, Pencil, Trash2, Tag, Ruler, Warehouse, Hash, FolderTree } from 'lucide-react';
 
 type Tab = 'departments' | 'areas' | 'equipment' | 'users' | 'categories' | 'units' | 'locations' | 'suppliers' | 'gr_numbers' | 'groups';
@@ -26,6 +27,7 @@ type SimpleMaster = 'categories' | 'units' | 'locations' | 'suppliers';
 type GRKind = 'credit' | 'cash' | 'import';
 const WO_TABS: Tab[] = ['departments', 'areas', 'equipment', 'users'];
 const INVENTORY_TABS: Tab[] = ['categories', 'units', 'locations', 'suppliers', 'gr_numbers', 'groups'];
+const EQUIPMENT_PAGE_SIZE = 10;
 const SIMPLE_TABLE: Record<SimpleMaster, string> = {
   categories: 'part_categories',
   units: 'units_of_measure',
@@ -44,6 +46,7 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
   const [departments, setDepartments] = useState<Department[]>([]);
   const [areas, setAreas] = useState<Area[]>([]);
   const [equipment, setEquipment] = useState<(Equipment & { area?: Area })[]>([]);
+  const [equipmentPage, setEquipmentPage] = useState(1);
   const [users, setUsers] = useState<Profile[]>([]);
   const [categories, setCategories] = useState<PartCategory[]>([]);
   const [units, setUnits] = useState<UnitOfMeasure[]>([]);
@@ -51,6 +54,7 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
   const [suppliers, setSuppliers] = useState<InventorySupplier[]>([]);
   const [supplierSort, setSupplierSort] = useState<'name-asc' | 'name-desc' | 'code-asc' | 'code-desc'>('name-asc');
   const [groups, setGroups] = useState<InventoryGroup[]>([]);
+  const [groupSort, setGroupSort] = useState<'name-asc' | 'name-desc' | 'code-asc' | 'code-desc'>('name-asc');
   const [latestGrNumbers, setLatestGrNumbers] = useState<Record<GRKind, string | null>>({ credit: null, cash: null, import: null });
   const [grForm, setGrForm] = useState<Record<GRKind, number>>({ credit: 1, cash: 1, import: 1 });
 
@@ -68,6 +72,7 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
     full_name: '',
     role: 'teknisi' as Role,
     department_id: '',
+    department_ids: [] as string[],
     password: '',
   });
   const [simpleForm, setSimpleForm] = useState({ name: '', code: '' });
@@ -78,20 +83,35 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
     loadAll();
   }, [scope]);
 
+  const equipmentPageCount = Math.max(1, Math.ceil(equipment.length / EQUIPMENT_PAGE_SIZE));
+  const pagedEquipment = equipment.slice((equipmentPage - 1) * EQUIPMENT_PAGE_SIZE, equipmentPage * EQUIPMENT_PAGE_SIZE);
+
+  useEffect(() => {
+    if (equipmentPage > equipmentPageCount) setEquipmentPage(equipmentPageCount);
+  }, [equipmentPage, equipmentPageCount]);
+
   async function loadAll() {
     setLoading(true);
 
     if (scope === 'wo') {
-      const [{ data: d }, { data: a }, { data: e }, { data: u }] = await Promise.all([
+      const [{ data: d }, { data: a }, { data: e }, { data: u }, { data: ud }] = await Promise.all([
         supabase.from('departments').select('*').order('name'),
         supabase.from('areas').select('*').order('name'),
         supabase.from('equipment').select('*, area:areas(*)').order('name'),
         supabase.from('profiles').select('*').order('full_name'),
+        supabase.from('profile_departments').select('profile_id, department_id'),
       ]);
       setDepartments((d as Department[]) ?? []);
       setAreas((a as unknown as Area[]) ?? []);
       setEquipment((e as unknown as (Equipment & { area?: Area })[]) ?? []);
-      setUsers((u as Profile[]) ?? []);
+      const departmentMap = new Map<string, string[]>();
+      for (const row of (ud ?? []) as { profile_id: string; department_id: string }[]) {
+        departmentMap.set(row.profile_id, [...(departmentMap.get(row.profile_id) ?? []), row.department_id]);
+      }
+      setUsers(((u as Profile[]) ?? []).map((user) => ({
+        ...user,
+        department_ids: [...new Set([...(departmentMap.get(user.id) ?? []), ...(user.department_id ? [user.department_id] : [])])],
+      })));
     } else {
       const [{ data: cat }, { data: un }, { data: loc }, sup, { data: gr }, { data: groupsData }, { data: transactions }, { data: serviceReceipts }] = await Promise.all([
         supabase.from('part_categories').select('*').order('name'),
@@ -137,7 +157,7 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
     if (type === 'departments') setDeptForm({ name: '', code: '' });
     if (type === 'areas') setAreaForm({ name: '' });
     if (type === 'equipment') setEquipForm({ area_id: '', name: '', code: '' });
-    if (type === 'users') setUserForm({ username: '', full_name: '', role: 'teknisi', department_id: '', password: '' });
+    if (type === 'users') setUserForm({ username: '', full_name: '', role: 'teknisi', department_id: '', department_ids: [], password: '' });
     if (isSimpleMaster(type)) setSimpleForm({ name: '', code: '' });
     if (type === 'groups') setGroupForm({ name: '', kode: '', use_abjad: true });
     setEditing({ type });
@@ -154,6 +174,7 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
         full_name: data.full_name as string,
         role: data.role as Role,
         department_id: (data.department_id as string) ?? '',
+        department_ids: ((data.department_ids as string[] | undefined) ?? ((data.department_id as string | null) ? [data.department_id as string] : [])),
         password: '',
       });
     }
@@ -192,11 +213,33 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
         await supabase.from('equipment').insert({ area_id: equipForm.area_id, name: equipForm.name, code: equipForm.code || null });
       }
     } else if (editing.type === 'users') {
+      const departmentIds = ['spv', 'ss'].includes(userForm.role)
+        ? [...new Set(userForm.department_ids)]
+        : (userForm.department_id ? [userForm.department_id] : []);
+      const primaryDepartmentId = departmentIds[0] ?? null;
       if (editing.id) {
+        const uname = normalizeUsername(userForm.username);
+        const usernameError = validateUsername(uname);
+        if (usernameError) {
+          alert(usernameError);
+          setActing(false);
+          return;
+        }
         if (userForm.password) {
           const passwordError = validatePassword(userForm.password);
           if (passwordError) {
             alert(passwordError);
+            setActing(false);
+            return;
+          }
+        }
+        if (uname !== normalizeUsername(String(editing.data?.username ?? ''))) {
+          const { error: usernameUpdateError } = await supabase.rpc('admin_update_username', {
+            p_user_id: editing.id,
+            p_username: uname,
+          });
+          if (usernameUpdateError) {
+            alert(usernameUpdateError.message);
             setActing(false);
             return;
           }
@@ -206,13 +249,27 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
           .update({
             full_name: userForm.full_name,
             role: userForm.role,
-            department_id: userForm.department_id || null,
+            department_id: primaryDepartmentId,
           })
           .eq('id', editing.id);
         if (updateError) {
           alert(updateError.message);
           setActing(false);
           return;
+        }
+        const { error: clearDepartmentsError } = await supabase.from('profile_departments').delete().eq('profile_id', editing.id);
+        if (clearDepartmentsError) {
+          alert(clearDepartmentsError.message);
+          setActing(false);
+          return;
+        }
+        if (departmentIds.length) {
+          const { error: departmentError } = await supabase.from('profile_departments').insert(departmentIds.map((department_id) => ({ profile_id: editing.id!, department_id })));
+          if (departmentError) {
+            alert(departmentError.message);
+            setActing(false);
+            return;
+          }
         }
         if (userForm.password) {
           const { error: pwError } = await supabase.rpc('admin_set_password', {
@@ -233,17 +290,25 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
           setActing(false);
           return;
         }
-        const { error } = await supabase.rpc('admin_create_user', {
+        const { data: newUserId, error } = await supabase.rpc('admin_create_user', {
           p_username: uname,
           p_password: userForm.password,
           p_full_name: userForm.full_name,
           p_role: userForm.role,
-          p_department_id: userForm.department_id || null,
+          p_department_id: primaryDepartmentId,
         });
         if (error) {
           alert(error.message);
           setActing(false);
           return;
+        }
+        if (newUserId && departmentIds.length) {
+          const { error: departmentError } = await supabase.from('profile_departments').insert(departmentIds.map((department_id) => ({ profile_id: newUserId as string, department_id })));
+          if (departmentError) {
+            alert('User berhasil dibuat, tetapi bagian gagal disimpan: ' + departmentError.message);
+            setActing(false);
+            return;
+          }
         }
       }
     } else if (isSimpleMaster(editing.type)) {
@@ -363,7 +428,7 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
   const tabs: { key: Tab; label: string; icon: typeof Building2 }[] = [
     { key: 'departments', label: 'Departments', icon: Building2 },
     { key: 'areas', label: 'Areas', icon: MapPin },
-    { key: 'equipment', label: 'Equipment', icon: Cpu },
+    { key: 'equipment', label: 'Mesin Target', icon: Cpu },
     { key: 'users', label: 'Users', icon: Users },
     { key: 'categories', label: 'Categories', icon: Tag },
     { key: 'units', label: 'Units', icon: Ruler },
@@ -451,12 +516,12 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
 
         {tab === 'equipment' && (
           <div className="space-y-2">
-            {equipment.map((eq) => (
+            {pagedEquipment.map((eq) => (
               <div key={eq.id} className="flex items-center justify-between p-3 rounded-lg bg-slate-50">
                 <div>
                   <p className="text-sm font-medium text-slate-900">{eq.name}</p>
                   <p className="text-xs text-slate-400">
-                    {eq.area?.name ?? '-'}
+                    {eq.code ? `${eq.code} · ` : ''}Lokasi/Area: {eq.area?.name ?? '-'}
                   </p>
                 </div>
                 <div className="flex gap-1">
@@ -470,6 +535,21 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
               </div>
             ))}
             {equipment.length === 0 && <p className="text-sm text-slate-400 py-4 text-center">No equipment yet</p>}
+            {equipment.length > EQUIPMENT_PAGE_SIZE && (
+              <div className="flex items-center justify-between gap-3 pt-2">
+                <p className="text-xs text-slate-500">
+                  Menampilkan {(equipmentPage - 1) * EQUIPMENT_PAGE_SIZE + 1}–{Math.min(equipmentPage * EQUIPMENT_PAGE_SIZE, equipment.length)} dari {equipment.length} mesin
+                </p>
+                <div className="flex gap-2">
+                  <Button variant="secondary" size="sm" disabled={equipmentPage <= 1} onClick={() => setEquipmentPage((page) => Math.max(1, page - 1))}>
+                    Sebelumnya
+                  </Button>
+                  <Button variant="secondary" size="sm" disabled={equipmentPage >= equipmentPageCount} onClick={() => setEquipmentPage((page) => Math.min(equipmentPageCount, page + 1))}>
+                    Berikutnya
+                  </Button>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -558,7 +638,23 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
               Grup inventori membentuk kode 9 digit (xxyyyzzzz) pada spare part: kode grup dipakai sebagai awalan,
               urutan abjad nama part disisipkan, dan nomor urut item mengikuti.
             </p>
-            {groups.map((g) => (
+            <div className="flex items-center justify-between gap-3 pb-1">
+              <span className="text-sm text-slate-500">Urutkan inventory group</span>
+              <Select value={groupSort} onChange={(e) => setGroupSort(e.target.value as typeof groupSort)} className="w-auto min-w-44">
+                <option value="name-asc">Nama (A–Z)</option>
+                <option value="name-desc">Nama (Z–A)</option>
+                <option value="code-asc">Kode (kecil–besar)</option>
+                <option value="code-desc">Kode (besar–kecil)</option>
+              </Select>
+            </div>
+            {[...groups].sort((a, b) => {
+              const [field, direction] = groupSort.split('-') as ['name' | 'code', 'asc' | 'desc'];
+              const aValue = field === 'name' ? a.name : (a.kode ?? '');
+              const bValue = field === 'name' ? b.name : (b.kode ?? '');
+              const result = aValue.localeCompare(bValue, 'id', { sensitivity: 'base', numeric: true });
+              const ordered = result || a.name.localeCompare(b.name, 'id', { sensitivity: 'base', numeric: true });
+              return direction === 'asc' ? ordered : -ordered;
+            }).map((g) => (
               <div key={g.id} className="flex items-center justify-between p-3 rounded-lg bg-slate-50">
                 <div>
                   <p className="text-sm font-medium text-slate-900">{g.name}</p>
@@ -692,7 +788,7 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
           {editing?.type === 'equipment' && (
             <>
               <div>
-                <Label>Area *</Label>
+                <Label>Lokasi/Area *</Label>
                 <Select value={equipForm.area_id} onChange={(e) => setEquipForm((f) => ({ ...f, area_id: e.target.value }))}>
                   <option value="">Select area...</option>
                   {areas.map((a) => (
@@ -701,7 +797,7 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
                 </Select>
               </div>
               <div>
-                <Label>Equipment Name *</Label>
+                <Label>Nama Mesin Target *</Label>
                 <Input value={equipForm.name} onChange={(e) => setEquipForm((f) => ({ ...f, name: e.target.value }))} placeholder="Motor 1" />
               </div>
               <div>
@@ -713,12 +809,11 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
 
           {editing?.type === 'users' && (
             <>
-              {!editing.id && (
-                <div>
-                  <Label>Username *</Label>
-                  <Input value={userForm.username} onChange={(e) => setUserForm((f) => ({ ...f, username: e.target.value }))} placeholder="budi.teknisi" autoCapitalize="none" />
-                </div>
-              )}
+              <div>
+                <Label>Username *</Label>
+                <Input value={userForm.username} onChange={(e) => setUserForm((f) => ({ ...f, username: e.target.value }))} placeholder="budi.teknisi" autoCapitalize="none" />
+                {editing.id && <p className="mt-1 text-xs text-slate-500">Perubahan username juga mengubah nama login user.</p>}
+              </div>
               <div>
                 <Label>Full Name *</Label>
                 <Input value={userForm.full_name} onChange={(e) => setUserForm((f) => ({ ...f, full_name: e.target.value }))} />
@@ -726,7 +821,13 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <Label>Role</Label>
-                  <Select value={userForm.role} onChange={(e) => setUserForm((f) => ({ ...f, role: e.target.value as Role }))}>
+                  <Select value={userForm.role} onChange={(e) => setUserForm((f) => {
+                    const role = e.target.value as Role;
+                    const department_ids = ['spv', 'ss'].includes(role) && f.department_ids.length === 0 && f.department_id
+                      ? [f.department_id]
+                      : f.department_ids;
+                    return { ...f, role, department_ids };
+                  })}>
                     <option value="admin">Admin</option>
                     <option value="ss">Senior Supervisor</option>
                     <option value="spv">SPV</option>
@@ -735,13 +836,20 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
                   </Select>
                 </div>
                 <div>
-                  <Label>Department</Label>
-                  <Select value={userForm.department_id} onChange={(e) => setUserForm((f) => ({ ...f, department_id: e.target.value }))}>
-                    <option value="">None</option>
-                    {departments.map((d) => (
-                      <option key={d.id} value={d.id}>{d.name}</option>
-                    ))}
-                  </Select>
+                  <Label>{['spv', 'ss'].includes(userForm.role) ? 'Departments' : 'Department'}</Label>
+                  {['spv', 'ss'].includes(userForm.role) ? (
+                    <MultiPicker
+                      options={departments.map((d) => ({ value: d.id, label: d.name, sublabel: d.code }))}
+                      value={userForm.department_ids}
+                      onChange={(department_ids) => setUserForm((f) => ({ ...f, department_ids, department_id: department_ids[0] ?? '' }))}
+                      placeholder="Cari dan pilih bagian..."
+                    />
+                  ) : (
+                    <Select value={userForm.department_id} onChange={(e) => setUserForm((f) => ({ ...f, department_id: e.target.value, department_ids: e.target.value ? [e.target.value] : [] }))}>
+                      <option value="">None</option>
+                      {departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                    </Select>
+                  )}
                 </div>
               </div>
               <div>

@@ -7,6 +7,7 @@ type AuthContextType = {
   profile: Profile | null;
   loading: boolean;
   signOut: () => Promise<void>;
+  refreshProfile: () => Promise<void>;
 };
 
 const AuthContext = createContext<AuthContextType>({
@@ -14,6 +15,7 @@ const AuthContext = createContext<AuthContextType>({
   profile: null,
   loading: true,
   signOut: async () => {},
+  refreshProfile: async () => {},
 });
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -55,7 +57,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       .eq('id', userId)
       .maybeSingle();
 
-    setProfile(data as Profile | null);
+    if (data) {
+      const { data: assignments } = await supabase
+        .from('profile_departments')
+        .select('department_id')
+        .eq('profile_id', userId);
+      const departmentIds = [...new Set([
+        ...(assignments ?? []).map((row) => row.department_id as string),
+        ...((data.department_id as string | null) ? [data.department_id as string] : []),
+      ])];
+      setProfile({ ...(data as Profile), department_ids: departmentIds });
+    } else {
+      setProfile(null);
+    }
     setLoading(false);
   }
 
@@ -64,8 +78,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setProfile(null);
   }
 
+  async function refreshProfile() {
+    if (session?.user.id) await loadProfile(session.user.id);
+  }
+
   return (
-    <AuthContext.Provider value={{ session, profile, loading, signOut }}>
+    <AuthContext.Provider value={{ session, profile, loading, signOut, refreshProfile }}>
       {children}
     </AuthContext.Provider>
   );

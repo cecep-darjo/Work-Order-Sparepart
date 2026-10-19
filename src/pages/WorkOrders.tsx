@@ -18,7 +18,8 @@ import {
   type Equipment,
 } from '@/lib/supabase';
 import { useDebouncedValue } from '@/lib/useDebouncedValue';
-import { matchesQuery } from '@/components/Pickers';
+import { matchesQuery, SearchablePicker, type PickerOption } from '@/components/Pickers';
+import { JOB_STATUS_LABELS, type JobStatus } from '@/lib/jobAssignments';
 import { Card, Badge, Button, Input, Select, Label, Modal, Textarea, Spinner, EmptyState } from '@/components/ui';
 import { ArrowDown, ArrowUp, BellRing, ClipboardCheck, Plus, Search } from 'lucide-react';
 import {
@@ -30,6 +31,18 @@ import {
 } from '@/lib/actionItems';
 
 type SortKey = 'created_at' | 'updated_at' | 'wo_number' | 'status' | 'priority' | 'department';
+type LinkableJob = {
+  id: string;
+  job_no: string;
+  title: string;
+  description: string | null;
+  status: JobStatus;
+  technician_id: string | null;
+  equipment_id: string | null;
+  report_notes: string | null;
+  equipment?: { id: string; area_id: string | null } | null;
+  assigned_technicians?: { technician_id: string; technician?: { full_name: string } | null }[];
+};
 const SORT_OPTIONS: { key: SortKey; label: string }[] = [
   { key: 'created_at', label: 'Tanggal Dibuat' },
   { key: 'updated_at', label: 'Terakhir Diperbarui' },
@@ -94,12 +107,15 @@ export default function WorkOrders({
   const [departments, setDepartments] = useState<Department[]>([]);
   const [areas, setAreas] = useState<Area[]>([]);
   const [equipmentList, setEquipmentList] = useState<Equipment[]>([]);
+  const [linkableJobs, setLinkableJobs] = useState<LinkableJob[]>([]);
   const [spvList, setSpvList] = useState<Profile[]>([]);
   const [userList, setUserList] = useState<Profile[]>([]); // pilihan username untuk peminta
   const [createForm, setCreateForm] = useState({
     department_id: '',
     area_id: '',
     equipment_id: '',
+    job_assignment_id: '',
+    manual_wo_suffix: '',
     problem_description: '',
     priority: 'standard' as 'standard' | 'urgent',
     work_types: [] as string[],
@@ -143,22 +159,32 @@ export default function WorkOrders({
   }, [loadWorkOrders]);
 
   async function loadCreateData() {
-    const [{ data: depts }, { data: spvs }, { data: users }, { data: areaRows }] = await Promise.all([
+    const [{ data: allDepts }, { data: spvs }, { data: users }, { data: areaRows }, { data: equipmentRows }, { data: jobs }, { data: linkedWos }] = await Promise.all([
       supabase.from('departments').select('*').order('name'),
       supabase.from('profiles').select('*').in('role', ['spv', 'ss']).eq('is_active', true).order('full_name'),
       supabase.from('profiles').select('*').eq('is_active', true).not('username', 'is', null).order('full_name'),
       supabase.from('areas').select('*').order('name'), // area terlepas dari departemen
+      supabase.from('equipment').select('*').order('name'),
+      supabase.from('job_assignments')
+        .select('id, job_no, title, description, status, technician_id, equipment_id, report_notes, equipment:equipment(id, area_id), assigned_technicians:job_assignment_technicians(technician_id, technician:profiles!technician_id(full_name))')
+        .in('status', ['assigned', 'on_the_way', 'in_progress', 'done', 'approved'])
+        .order('created_at', { ascending: false })
+        .limit(500),
+      supabase.from('work_orders').select('job_assignment_id').not('job_assignment_id', 'is', null),
     ]);
+    let depts = allDepts ?? [];
+    if (profile?.role === 'ss' || profile?.role === 'spv') {
+      const { data: assignments } = await supabase.from('profile_departments').select('department_id').eq('profile_id', profile.id);
+      const allowedIds = new Set([...(assignments ?? []).map((row) => row.department_id as string), ...(profile.department_id ? [profile.department_id] : [])]);
+      depts = depts.filter((department) => allowedIds.has(department.id));
+    }
     setAreas((areaRows as Area[]) ?? []);
+    setEquipmentList((equipmentRows as Equipment[]) ?? []);
+    const linkedJobIds = new Set(((linkedWos ?? []) as { job_assignment_id: string }[]).map((row) => row.job_assignment_id));
+    setLinkableJobs(((jobs ?? []) as unknown as LinkableJob[]).filter((job) => !linkedJobIds.has(job.id)));
     setDepartments((depts as Department[]) ?? []);
     setSpvList((spvs as Profile[]) ?? []);
     setUserList((users as Profile[]) ?? []);
-  }
-
-  async function loadEquipment(areaId: string) {
-    const { data } = await supabase.from('equipment').select('*').eq('area_id', areaId).order('name');
-    setEquipmentList((data as Equipment[]) ?? []);
-    setCreateForm((f) => ({ ...f, equipment_id: '' }));
   }
 
   // Pilih peminta dari username -> nama & departemen terisi otomatis (tetap bisa diubah manual).
@@ -174,12 +200,20 @@ export default function WorkOrders({
 
   async function handleCreate() {
     if (!profile || !createForm.department_id || !createForm.problem_description) return;
+    const manualSuffix = createForm.manual_wo_suffix.trim();
+    if (manualSuffix && (!/^\d+$/.test(manualSuffix) || Number(manualSuffix) < 1 || Number(manualSuffix) > 2147483647)) {
+      alert('Nomor urut WO harus berupa angka lebih besar dari 0.');
+      return;
+    }
     setCreating(true);
 
-    // Nomor WO dibuat di server: WOaa/bbbb/cc/ddddd (tahun/departemen/bulan/urut)
-    const { data: woNumber, error: numberError } = await supabase.rpc('next_wo_number', {
-      p_department_id: createForm.department_id,
-    });
+    // Prefix tetap dibuat server; admin/SS/SPV boleh mengisi angka urut terakhir secara manual.
+    const { data: woNumber, error: numberError } = manualSuffix
+      ? await supabase.rpc('reserve_manual_wo_number', {
+          p_department_id: createForm.department_id,
+          p_suffix: Number(manualSuffix),
+        })
+      : await supabase.rpc('next_wo_number', { p_department_id: createForm.department_id });
     if (numberError || !woNumber) {
       alert('Gagal membuat nomor WO: ' + (numberError?.message ?? 'nomor kosong'));
       setCreating(false);
@@ -194,6 +228,7 @@ export default function WorkOrders({
       work_types: createForm.work_types,
       status: createForm.spv_id ? 'assigned' : 'new',
     };
+    if (createForm.job_assignment_id) insertData.job_assignment_id = createForm.job_assignment_id;
     if (createForm.area_id) insertData.area_id = createForm.area_id;
     if (createForm.equipment_id) insertData.equipment_id = createForm.equipment_id;
     if (createForm.spv_id) insertData.spv_id = createForm.spv_id;
@@ -205,23 +240,30 @@ export default function WorkOrders({
 
     const { data, error } = await supabase.from('work_orders').insert(insertData).select().single();
 
-    if (!error && data) {
-      // Log history
-      await supabase.from('work_order_history').insert({
-        work_order_id: data.id,
-        status: data.status,
-        action: 'WO created',
-        performed_by: profile.id,
-      });
-      // Activity log
-      await supabase.from('activity_log').insert({
-        user_id: profile.id,
-        action: 'create_wo',
-        entity_type: 'work_order',
-        entity_id: data.id,
-        details: `Created ${woNumber}`,
-      });
+    if (error || !data) {
+      alert(error?.code === '23505' && manualSuffix
+        ? `Nomor WO dengan urutan ${manualSuffix} sudah digunakan. Pilih angka lain.`
+        : 'Gagal membuat Work Order: ' + (error?.message ?? 'data WO tidak tersimpan'));
+      setCreating(false);
+      return;
     }
+
+    // Log history
+    await supabase.from('work_order_history').insert({
+      work_order_id: data.id,
+      status: data.status,
+      action: data.status === 'closed' ? 'WO created and closed from approved Jobs Assignment' : 'WO created',
+      notes: createForm.job_assignment_id ? `Jobs Assignment terkait: ${linkableJobs.find((job) => job.id === createForm.job_assignment_id)?.job_no ?? ''}` : null,
+      performed_by: profile.id,
+    });
+    // Activity log
+    await supabase.from('activity_log').insert({
+      user_id: profile.id,
+      action: 'create_wo',
+      entity_type: 'work_order',
+      entity_id: data.id,
+      details: `Created ${woNumber}`,
+    });
 
     setCreating(false);
     setShowCreate(false);
@@ -229,6 +271,8 @@ export default function WorkOrders({
       department_id: '',
       area_id: '',
       equipment_id: '',
+      job_assignment_id: '',
+      manual_wo_suffix: '',
       problem_description: '',
       priority: 'standard',
       work_types: [],
@@ -376,9 +420,43 @@ export default function WorkOrders({
     setOnlyAction(false);
   }
 
+  const equipmentPickerOptions = useMemo<PickerOption[]>(() => equipmentList
+    .filter((equipment) => !createForm.area_id || equipment.area_id === createForm.area_id)
+    .map((equipment) => {
+      const areaName = areas.find((area) => area.id === equipment.area_id)?.name;
+      return {
+        value: equipment.id,
+        label: equipment.name,
+        sublabel: [equipment.code, areaName].filter(Boolean).join(' • '),
+        search: [equipment.name, equipment.code, areaName].filter(Boolean).join(' '),
+      };
+    }), [areas, createForm.area_id, equipmentList]);
+  const jobAssignmentPickerOptions = useMemo<PickerOption[]>(() => linkableJobs.map((job) => {
+    const technicianNames = job.assigned_technicians?.map((member) => member.technician?.full_name).filter(Boolean).join(', ')
+      || (job.technician_id ? 'Teknisi ditugaskan' : 'Menunggu teknisi');
+    const statusLabel = JOB_STATUS_LABELS[job.status];
+    return {
+      value: job.id,
+      label: `${job.job_no} — ${job.title}`,
+      sublabel: `${statusLabel} · ${technicianNames}`,
+      search: `${job.job_no} ${job.title} ${statusLabel} ${technicianNames}`,
+    };
+  }), [linkableJobs]);
+
   if (loading) return <Spinner />;
 
-  const canCreate = profile?.role === 'admin' || profile?.role === 'ss';
+  const canCreate = profile?.role === 'admin' || profile?.role === 'ss' || profile?.role === 'spv';
+  const woDateParts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Jakarta', year: '2-digit', month: '2-digit',
+  }).formatToParts(new Date());
+  const woYear = woDateParts.find((part) => part.type === 'year')?.value ?? '';
+  const woMonth = woDateParts.find((part) => part.type === 'month')?.value ?? '';
+  const selectedDepartmentCode = (departments.find((department) => department.id === createForm.department_id)?.code ?? '')
+    .replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+  const woNumberPrefix = selectedDepartmentCode ? `WO${woYear}/${selectedDepartmentCode}/${woMonth}/` : '';
+  const woSuffixPreview = createForm.manual_wo_suffix
+    ? String(Number(createForm.manual_wo_suffix)).padStart(5, '0')
+    : 'otomatis';
 
   return (
     <div className="space-y-4">
@@ -417,7 +495,11 @@ export default function WorkOrders({
           </Button>
         )}
         {canCreate && (
-          <Button onClick={() => { loadCreateData(); setShowCreate(true); }}>
+          <Button onClick={() => {
+            loadCreateData();
+            if (profile?.role === 'spv') setCreateForm((form) => ({ ...form, spv_id: profile.id }));
+            setShowCreate(true);
+          }}>
             <Plus className="w-4 h-4" />
             New WO
           </Button>
@@ -593,6 +675,7 @@ export default function WorkOrders({
                   {wo.department && <span>{wo.department.name}</span>}
                   {wo.area && <span>• {wo.area.name}</span>}
                   {wo.equipment && <span>• {wo.equipment.name}</span>}
+                  {wo.job_assignment && <span>• JA: {wo.job_assignment.job_no}</span>}
                   {wo.requester_name && <span>• Peminta: {wo.requester_name}</span>}
                   {profile?.role === 'spv' && (
                     <span>
@@ -625,6 +708,19 @@ export default function WorkOrders({
                 <option key={d.id} value={d.id}>{d.name}</option>
               ))}
             </Select>
+          </div>
+
+          <div>
+            <Label>Nomor urut belakang (opsional)</Label>
+            <Input
+              value={createForm.manual_wo_suffix}
+              onChange={(e) => setCreateForm((form) => ({ ...form, manual_wo_suffix: e.target.value.replace(/\D/g, '').slice(0, 10) }))}
+              inputMode="numeric"
+              placeholder="Kosongkan untuk nomor otomatis"
+            />
+            <p className="mt-1 text-xs text-slate-500">
+              Hanya angka bagian akhir yang dapat diisi. Preview: {woNumberPrefix || 'pilih departemen untuk melihat prefix'}{woSuffixPreview}
+            </p>
           </div>
 
           <div className="rounded-lg border border-slate-200 p-3 space-y-3">
@@ -673,8 +769,7 @@ export default function WorkOrders({
               <Select
                 value={createForm.area_id}
                 onChange={(e) => {
-                  setCreateForm((f) => ({ ...f, area_id: e.target.value }));
-                  loadEquipment(e.target.value);
+                  setCreateForm((f) => ({ ...f, area_id: e.target.value, equipment_id: '' }));
                 }}
                 disabled={!areas.length}
               >
@@ -685,18 +780,53 @@ export default function WorkOrders({
               </Select>
             </div>
             <div>
-              <Label>Equipment</Label>
-              <Select
+              <Label>Mesin Target</Label>
+              <SearchablePicker
+                inline
                 value={createForm.equipment_id}
-                onChange={(e) => setCreateForm((f) => ({ ...f, equipment_id: e.target.value }))}
-                disabled={!equipmentList.length}
-              >
-                <option value="">Select equipment...</option>
-                {equipmentList.map((eq) => (
-                  <option key={eq.id} value={eq.id}>{eq.name}</option>
-                ))}
-              </Select>
+                options={equipmentPickerOptions}
+                placeholder="Cari & pilih mesin target..."
+                searchPlaceholder="Cari nama, kode, atau area mesin..."
+                emptyText="Mesin target tidak ditemukan."
+                disabled={equipmentPickerOptions.length === 0}
+                onChange={(equipmentId) => {
+                  const selectedEquipment = equipmentList.find((equipment) => equipment.id === equipmentId);
+                  setCreateForm((form) => ({
+                    ...form,
+                    equipment_id: equipmentId,
+                    ...(selectedEquipment && !form.area_id ? { area_id: selectedEquipment.area_id } : {}),
+                  }));
+                }}
+              />
+              {equipmentPickerOptions.length === 0 && (
+                <p className="mt-1 text-xs text-slate-500">Belum ada mesin target untuk area ini.</p>
+              )}
             </div>
+          </div>
+
+          <div>
+            <Label>Jobs Assignment (opsional)</Label>
+            <SearchablePicker
+              inline
+              value={createForm.job_assignment_id}
+              options={jobAssignmentPickerOptions}
+              placeholder="Cari & pilih Jobs Assignment..."
+              searchPlaceholder="Cari nomor, judul, status, atau teknisi..."
+              emptyText="Tidak ada Jobs Assignment aktif atau selesai yang tersedia."
+              onChange={(job_assignment_id) => {
+                const job = linkableJobs.find((item) => item.id === job_assignment_id);
+                setCreateForm((form) => ({
+                  ...form,
+                  job_assignment_id,
+                  ...(job ? {
+                    area_id: job.equipment?.area_id ?? '',
+                    equipment_id: job.equipment_id ?? '',
+                    problem_description: [job.title, job.description].filter((part) => part?.trim()).join('\n'),
+                  } : {}),
+                }));
+              }}
+            />
+            <p className="mt-1 text-xs text-slate-500">WO akan otomatis ditutup setelah Jobs Assignment terkait disetujui.</p>
           </div>
 
           <div>
@@ -750,6 +880,7 @@ export default function WorkOrders({
             <Select
               value={createForm.spv_id}
               onChange={(e) => setCreateForm((f) => ({ ...f, spv_id: e.target.value }))}
+              disabled={profile?.role === 'spv'}
             >
               <option value="">Select SPV...</option>
               {spvList.map((s) => (

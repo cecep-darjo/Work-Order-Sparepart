@@ -30,7 +30,15 @@ import { Camera, Clock, MapPin, Navigation, Play, Plus, RefreshCw, Search, User 
 const POLL_MS = 30000;
 
 type StatusFilter = 'open' | 'running' | 'overdue' | 'all' | JobStatus;
-type TechTab = 'active' | 'review' | 'history';
+type TechTab = 'active' | 'today' | 'review' | 'history';
+
+function isCompletedToday(job: JobAssignment, now: number): boolean {
+  if (!job.done_at || !['done', 'approved'].includes(job.status)) return false;
+  const dayInJakarta = (value: Date) => new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(value);
+  return dayInJakarta(new Date(job.done_at)) === dayInJakarta(new Date(now));
+}
 
 function sortRank(status: JobStatus): number {
   if (status === 'done') return 0;
@@ -111,6 +119,9 @@ function JobCard({
         <div className="flex flex-wrap items-center gap-2 mb-1.5">
           <span className="text-xs font-mono text-slate-400">{job.job_no}</span>
           <Badge className={JOB_STATUS_COLORS[job.status]}>{JOB_STATUS_LABELS[job.status]}</Badge>
+          {!(job.assigned_technicians?.length || job.technician_id) && (
+            <Badge className="bg-amber-100 text-amber-800 border-amber-200">Menunggu Assignment Teknisi</Badge>
+          )}
           <Badge className={JOB_PRIORITY_COLORS[job.priority]}>{JOB_PRIORITY_LABELS[job.priority]}</Badge>
           {overdue && <Badge className="bg-red-100 text-red-700 border-red-200">Terlambat</Badge>}
           {wasFinishedLate(job) && <Badge className="bg-orange-100 text-orange-700 border-orange-200">Selesai terlambat</Badge>}
@@ -123,10 +134,13 @@ function JobCard({
             <MapPin className="w-3.5 h-3.5 flex-shrink-0" />
             <span className="truncate max-w-[14rem]">{job.location}</span>
           </span>
+          {(job.equipment || job.manual_equipment) && (
+            <span className="truncate max-w-[20rem]">Mesin target: {job.equipment?.name ?? job.manual_equipment} · {job.equipment?.area?.name ?? job.location}</span>
+          )}
           {showTechnician && (
             <span className="inline-flex items-center gap-1">
               <User className="w-3.5 h-3.5" />
-              {job.technician?.full_name ?? '-'}
+              {job.assigned_technicians?.map((member) => member.technician?.full_name).filter(Boolean).join(', ') || job.technician?.full_name || 'Menunggu Assignment Teknisi'}
             </span>
           )}
           <span className={`inline-flex items-center gap-1 ${overdue ? 'text-red-600 font-medium' : ''}`}>
@@ -181,7 +195,6 @@ export default function JobAssignments() {
   const [tab, setTab] = useState<TechTab>('active');
 
   const [technicians, setTechnicians] = useState<JobPerson[]>([]);
-  const [areaNames, setAreaNames] = useState<string[]>([]);
 
   const [detailId, setDetailId] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
@@ -226,18 +239,26 @@ export default function JobAssignments() {
     };
   }, [load]);
 
-  // Daftar teknisi & saran lokasi (hanya atasan yang membuat penugasan)
+  // Daftar teknisi (hanya atasan yang membuat penugasan); Area dimuat di form.
   useEffect(() => {
     if (!isManager) return;
     (async () => {
-      const [techRes, areaRes] = await Promise.all([
-        supabase.from('profiles').select('id, full_name, username').eq('role', 'teknisi').eq('is_active', true).order('full_name'),
-        supabase.from('areas').select('name').order('name'),
-      ]);
-      setTechnicians((techRes.data as JobPerson[] | null) ?? []);
-      setAreaNames(((areaRes.data as { name: string }[] | null) ?? []).map((a) => a.name));
+      const techRes = await supabase
+        .from('profiles')
+        .select('id, full_name, username, department_id, department_assignments:profile_departments(department_id)')
+        .eq('role', 'teknisi')
+        .eq('is_active', true)
+        .order('full_name');
+      const rows = (techRes.data ?? []) as unknown as (JobPerson & { department_id: string | null; department_assignments?: { department_id: string }[] })[];
+      if (profile?.role === 'admin') {
+        setTechnicians(rows);
+      } else {
+        const { data: assignments } = await supabase.from('profile_departments').select('department_id').eq('profile_id', profile!.id);
+        const allowedIds = new Set([...(assignments ?? []).map((row) => row.department_id as string), ...(profile?.department_id ? [profile.department_id] : [])]);
+        setTechnicians(rows.filter((tech) => allowedIds.has(tech.department_id ?? '') || tech.department_assignments?.some((assignment) => allowedIds.has(assignment.department_id))));
+      }
     })();
-  }, [isManager]);
+  }, [isManager, profile]);
 
   const afterChange = useCallback(async () => {
     await load(true);
@@ -251,15 +272,13 @@ export default function JobAssignments() {
 
   const activeCounts = useMemo(() => {
     const m: Record<string, number> = {};
-    for (const j of jobs) if (isJobActive(j.status)) m[j.technician_id] = (m[j.technician_id] ?? 0) + 1;
+    for (const j of jobs) {
+      if (!isJobActive(j.status)) continue;
+      const ids = j.assigned_technicians?.map((member) => member.technician_id) ?? (j.technician_id ? [j.technician_id] : []);
+      for (const id of new Set(ids)) m[id] = (m[id] ?? 0) + 1;
+    }
     return m;
   }, [jobs]);
-
-  const locationSuggestions = useMemo(() => {
-    const set = new Set<string>(areaNames);
-    for (const j of jobs) set.add(j.location);
-    return [...set].sort((a, b) => a.localeCompare(b));
-  }, [areaNames, jobs]);
 
   const stats = useMemo(
     () => ({
@@ -282,12 +301,13 @@ export default function JobAssignments() {
         if (statusFilter === 'overdue' && !isJobOverdue(j, now)) return false;
         if (!['open', 'running', 'overdue', 'all'].includes(statusFilter) && j.status !== statusFilter) return false;
         if (priorityFilter !== 'all' && j.priority !== priorityFilter) return false;
-        if (techFilter !== 'all' && j.technician_id !== techFilter) return false;
+        if (techFilter !== 'all' && !(j.assigned_technicians?.some((member) => member.technician_id === techFilter) ?? j.technician_id === techFilter)) return false;
         return true;
       });
     } else {
       list = list.filter((j) => {
         if (tab === 'active') return isJobActive(j.status);
+        if (tab === 'today') return isCompletedToday(j, now);
         if (tab === 'review') return j.status === 'done';
         return j.status === 'approved' || j.status === 'canceled';
       });
@@ -299,7 +319,7 @@ export default function JobAssignments() {
           j.title.toLowerCase().includes(q) ||
           j.job_no.toLowerCase().includes(q) ||
           j.location.toLowerCase().includes(q) ||
-          (j.technician?.full_name ?? '').toLowerCase().includes(q),
+          (j.assigned_technicians?.map((member) => member.technician?.full_name ?? '').join(' ') ?? j.technician?.full_name ?? '').toLowerCase().includes(q),
       );
     }
     return [...list].sort(compareJobs);
@@ -308,10 +328,11 @@ export default function JobAssignments() {
   const techCounts = useMemo(
     () => ({
       active: jobs.filter((j) => isJobActive(j.status)).length,
+      today: jobs.filter((j) => isCompletedToday(j, now)).length,
       review: jobs.filter((j) => j.status === 'done').length,
       history: jobs.filter((j) => j.status === 'approved' || j.status === 'canceled').length,
     }),
-    [jobs],
+    [jobs, now],
   );
 
   /** Satu ketukan dari kartu: On the Way / Mulai Kerja (teknisi). */
@@ -459,10 +480,11 @@ export default function JobAssignments() {
       {/* ---------------------------- TEKNISI --------------------------- */}
       {!isManager && !loadError && (
         <>
-          <div className="grid grid-cols-3 gap-1.5 bg-slate-100 p-1 rounded-xl">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 bg-slate-100 p-1 rounded-xl">
             {(
               [
                 ['active', 'Aktif', techCounts.active],
+                ['today', 'Selesai hari ini', techCounts.today],
                 ['review', 'Menunggu approval', techCounts.review],
                 ['history', 'Riwayat', techCounts.history],
               ] as [TechTab, string, number][]
@@ -535,7 +557,6 @@ export default function JobAssignments() {
           job={editingJob}
           technicians={technicians}
           activeCounts={activeCounts}
-          locationSuggestions={locationSuggestions}
           onClose={() => setFormOpen(false)}
           onSaved={async (message) => {
             setFormOpen(false);

@@ -15,7 +15,6 @@ import {
   fmtJobDateTime,
   isJobActive,
   isJobFinal,
-  isJobManager,
   isJobOverdue,
   jobErrorMessage,
   uploadJobPhotos,
@@ -31,6 +30,7 @@ import {
   CheckCircle2,
   Clock,
   Flag,
+  ImagePlus,
   MapPin,
   Navigation,
   Pencil,
@@ -67,6 +67,7 @@ export default function JobAssignmentDetail({
 }) {
   const { profile } = useAuth();
   const fileRef = useRef<HTMLInputElement>(null);
+  const cameraRef = useRef<HTMLInputElement>(null);
 
   const [job, setJob] = useState<JobAssignment | null>(null);
   const [photos, setPhotos] = useState<JobPhoto[]>([]);
@@ -133,8 +134,11 @@ export default function JobAssignmentDetail({
     );
   }
 
-  const isManager = isJobManager(profile.role);
-  const isAssignee = profile.role === 'teknisi' && job.technician_id === profile.id;
+  const isManager = profile.role === 'admin' || profile.role === 'ss' || profile.role === 'spv';
+  const canManageAssignment = profile.role === 'admin' || profile.role === 'ss' || (profile.role === 'spv' && job.created_by === profile.id);
+  const isAssignee = profile.role === 'teknisi' && (
+    job.assigned_technicians?.some((member) => member.technician_id === profile.id) ?? job.technician_id === profile.id
+  );
   const overdue = isJobOverdue(job);
   const finishedLate = wasFinishedLate(job);
   const working = job.status === 'on_the_way' || job.status === 'in_progress';
@@ -194,6 +198,7 @@ export default function JobAssignmentDetail({
     if (photos.length + files.length > JOB_PHOTO_MAX_COUNT) {
       alert(`Maksimal ${JOB_PHOTO_MAX_COUNT} foto per tugas (saat ini ${photos.length}).`);
       if (fileRef.current) fileRef.current.value = '';
+      if (cameraRef.current) cameraRef.current.value = '';
       return;
     }
     setUploading(true);
@@ -204,6 +209,7 @@ export default function JobAssignmentDetail({
     } finally {
       setUploading(false);
       if (fileRef.current) fileRef.current.value = '';
+      if (cameraRef.current) cameraRef.current.value = '';
       await refreshAll();
     }
   }
@@ -247,6 +253,9 @@ export default function JobAssignmentDetail({
           <div>
             <div className="flex flex-wrap items-center gap-2 mb-2">
               <Badge className={JOB_STATUS_COLORS[job.status]}>{JOB_STATUS_LABELS[job.status]}</Badge>
+              {!(job.assigned_technicians?.length || job.technician_id) && (
+                <Badge className="bg-amber-100 text-amber-800 border-amber-200">Menunggu Assignment Teknisi</Badge>
+              )}
               <Badge className={JOB_PRIORITY_COLORS[job.priority]}>{JOB_PRIORITY_LABELS[job.priority]}</Badge>
               {job.status === 'done' && isManager && (
                 <Badge className="bg-amber-100 text-amber-800 border-amber-200">Menunggu approval</Badge>
@@ -263,8 +272,13 @@ export default function JobAssignmentDetail({
             <InfoItem icon={<MapPin className="w-4 h-4" />} label="Lokasi">
               {job.location}
             </InfoItem>
+            <InfoItem icon={<MapPin className="w-4 h-4" />} label="Mesin target">
+              {job.equipment
+                ? `${job.equipment.name}${job.equipment.code ? ` (${job.equipment.code})` : ''} · Area: ${job.equipment.area?.name ?? job.location}`
+                : job.manual_equipment || '-'}
+            </InfoItem>
             <InfoItem icon={<User className="w-4 h-4" />} label="Teknisi">
-              {job.technician?.full_name ?? '-'}
+              {job.assigned_technicians?.map((member) => member.technician?.full_name).filter(Boolean).join(', ') || job.technician?.full_name || 'Menunggu Assignment Teknisi'}
             </InfoItem>
             <InfoItem icon={<Clock className="w-4 h-4" />} label="Deadline">
               <span className={overdue ? 'text-red-600 font-medium' : ''}>{fmtJobDateTime(job.deadline)}</span>
@@ -323,15 +337,32 @@ export default function JobAssignmentDetail({
                     className="hidden"
                     onChange={(e) => handleFiles(e.target.files)}
                   />
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    onClick={() => fileRef.current?.click()}
-                    disabled={uploading || photos.length >= JOB_PHOTO_MAX_COUNT}
-                  >
-                    <Camera className="w-4 h-4" />
-                    {uploading ? 'Mengunggah...' : 'Tambah Foto'}
-                  </Button>
+                  <input
+                    ref={cameraRef}
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp"
+                    capture="environment"
+                    className="hidden"
+                    onChange={(e) => handleFiles(e.target.files)}
+                  />
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => cameraRef.current?.click()}
+                      disabled={uploading || photos.length >= JOB_PHOTO_MAX_COUNT}
+                    >
+                      <Camera className="w-4 h-4" /> Ambil Foto
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => fileRef.current?.click()}
+                      disabled={uploading || photos.length >= JOB_PHOTO_MAX_COUNT}
+                    >
+                      <ImagePlus className="w-4 h-4" /> Pilih dari Galeri
+                    </Button>
+                  </div>
                 </>
               )}
             </div>
@@ -436,7 +467,7 @@ export default function JobAssignmentDetail({
           )}
 
           {/* ------------------------ Aksi ATASAN ------------------------- */}
-          {isManager && !isJobFinal(job.status) && (
+          {canManageAssignment && !isJobFinal(job.status) && (
             <div className="border-t border-slate-200 pt-4 space-y-3">
               {job.status === 'done' && (
                 <>

@@ -14,6 +14,7 @@ import GoodsReceipts from '@/pages/GoodsReceipts';
 import Bons from '@/pages/Bons';
 import AdminPanel from '@/pages/AdminPanel';
 import ActivityLogPage from '@/pages/ActivityLogPage';
+import UserSettings from '@/pages/UserSettings';
 import { Spinner } from '@/components/ui';
 import { isSupabaseConfigured } from '@/lib/supabase';
 
@@ -70,6 +71,7 @@ function AppContent() {
           {page === 'master_wo' && <AdminPanel scope="wo" />}
           {page === 'master_inventory' && <AdminPanel scope="inventory" />}
           {page === 'activity' && <ActivityLogPage />}
+          {page === 'user_settings' && <UserSettings />}
         </>
       )}
     </Layout>

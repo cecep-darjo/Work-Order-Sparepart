@@ -107,9 +107,7 @@ export async function downloadWoCompletionReport(input: WoCompletionReportInput)
       ['Mulai Dikerjakan', fmtDateTime(workTimes.startedAt), 'Selesai', fmtDateTime(workTimes.finishedAt)],
       ['Disetujui SPV', verifiedBy ?? wo.spv?.full_name ?? '-', 'Waktu Approval', fmtDateTime(verifiedAt)],
       ['Deskripsi Masalah', wo.problem_description],
-      ['Analisa', wo.analysis ?? '-'],
-      ['Tindakan', wo.action_taken ?? '-'],
-      ['Hasil', wo.result ?? '-'],
+      ['Uraian Pekerjaan', [wo.analysis, wo.action_taken, wo.result].filter(Boolean).join('\n\n') || '-'],
     ],
   });
 

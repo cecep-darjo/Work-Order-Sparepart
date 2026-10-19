@@ -140,7 +140,7 @@ export function woActionsFor(wo: ActionableWo, profile: Profile, req?: WoPartReq
   const out: WoActionKind[] = [];
   const role = profile.role;
   const isAdminOrSs = role === 'admin' || role === 'ss';
-  const isSpv = role === 'spv' && (profile.department_id === wo.department_id || wo.spv_id === profile.id);
+  const isSpv = role === 'spv' && (profile.department_ids?.includes(wo.department_id) || profile.department_id === wo.department_id || wo.spv_id === profile.id);
   const techCount = (wo.technicians ?? []).length;
 
   if (isAdminOrSs && wo.status === 'new' && !wo.spv_id) out.push('assign_spv');
@@ -288,10 +288,10 @@ async function buildGroups(profile: Profile): Promise<ActionGroup[]> {
   const isManager = isAdmin || isSS || isSpv;
   let jobQuery = supabase
     .from('job_assignments')
-    .select('id, job_no, title, status, deadline, technician:profiles!technician_id(full_name)')
+    .select('id, job_no, title, status, deadline, technician:profiles!technician_id(full_name), assigned_technicians:job_assignment_technicians!inner(technician_id, technician:profiles!technician_id(full_name))')
     .order('deadline', { ascending: true })
     .limit(LIMIT);
-  if (isTech) jobQuery = jobQuery.eq('technician_id', profile.id).in('status', ['assigned', 'on_the_way', 'in_progress']);
+  if (isTech) jobQuery = jobQuery.eq('assigned_technicians.technician_id', profile.id).in('status', ['assigned', 'on_the_way', 'in_progress']);
   else jobQuery = jobQuery.in('status', ['assigned', 'on_the_way', 'in_progress', 'done']);
   const jobPromise = isTech || isManager ? jobQuery : Promise.resolve({ data: [] as unknown[] });
 
@@ -332,8 +332,10 @@ async function buildGroups(profile: Profile): Promise<ActionGroup[]> {
     status: string;
     deadline: string;
     technician: { full_name: string } | null;
+    assigned_technicians?: { technician: { full_name: string } | null }[];
   };
   const jobs = (jobRes.data as unknown as JobRow[]) ?? [];
+  const assignedNames = (j: JobRow) => j.assigned_technicians?.map((member) => member.technician?.full_name).filter(Boolean).join(', ') || j.technician?.full_name || '';
   const nowMs = Date.now();
   const isLate = (j: JobRow) => j.status !== 'done' && new Date(j.deadline).getTime() < nowMs;
   const fmtDue = (iso: string) => new Date(iso).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' });
@@ -371,7 +373,7 @@ async function buildGroups(profile: Profile): Promise<ActionGroup[]> {
         rows: review.map((j) => ({
           id: j.id,
           title: j.title,
-          subtitle: `${j.job_no}${j.technician?.full_name ? ` • ${j.technician.full_name}` : ''}`,
+          subtitle: `${j.job_no}${assignedNames(j) ? ` • ${assignedNames(j)}` : ''}`,
         })),
       });
     const late = jobs.filter(isLate);
@@ -386,7 +388,7 @@ async function buildGroups(profile: Profile): Promise<ActionGroup[]> {
         rows: late.map((j) => ({
           id: j.id,
           title: j.title,
-          subtitle: `${j.job_no}${j.technician?.full_name ? ` • ${j.technician.full_name}` : ''} • deadline ${fmtDue(j.deadline)}`,
+          subtitle: `${j.job_no}${assignedNames(j) ? ` • ${assignedNames(j)}` : ''} • deadline ${fmtDue(j.deadline)}`,
         })),
       });
   }

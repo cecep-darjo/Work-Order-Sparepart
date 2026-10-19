@@ -50,6 +50,9 @@ export function woWorkTimes(history: WorkOrderHistory[], currentStatus: string):
   let lastDone: string | null = null;
 
   for (const h of asc) {
+    // Riwayat Jobs Assignment membawa timestamp mulai/selesai asli ke timeline WO.
+    if (h.job_assignment_history_id && h.status === 'in_progress' && !firstProgress) firstProgress = h.performed_at;
+    if (h.job_assignment_history_id && h.status === 'done') lastDone = h.performed_at;
     if (h.status !== prev) {
       if (h.status === 'on_progress' && !firstProgress) firstProgress = h.performed_at;
       if (h.status === 'analysis' && !firstAnalysis) firstAnalysis = h.performed_at;

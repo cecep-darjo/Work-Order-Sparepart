@@ -64,6 +64,7 @@ export type Profile = {
   username: string | null;
   role: Role;
   department_id: string | null;
+  department_ids?: string[];
   is_active: boolean;
   created_at: string;
 };
@@ -151,6 +152,7 @@ export type WorkOrder = {
   department_id: string;
   area_id: string | null;
   equipment_id: string | null;
+  job_assignment_id: string | null;
   problem_description: string;
   priority: 'standard' | 'urgent';
   work_types: string[];
@@ -171,6 +173,7 @@ export type WorkOrder = {
   department?: Department;
   area?: Area;
   equipment?: Equipment;
+  job_assignment?: { id: string; job_no: string; title: string; status: string } | null;
   spv?: Profile;
   technicians?: { technician: Profile | null }[];
 };
@@ -192,6 +195,7 @@ export type WorkOrderHistory = {
   notes: string | null;
   performed_by: string;
   performed_at: string;
+  job_assignment_history_id?: string | null;
   performer?: Profile;
 };
 
@@ -209,7 +213,7 @@ export type ActivityLog = {
 
 // Kolom teknisi utama (work_orders.technician_id) diisi otomatis oleh database; UI memakai daftar `technicians`.
 export const WO_SELECT =
-  '*, department:departments(*), area:areas(*), equipment:equipment(*), spv:profiles!spv_id(*), technicians:work_order_technicians(technician:profiles!technician_id(*))';
+  '*, department:departments(*), area:areas(*), equipment:equipment(*), job_assignment:job_assignments(id, job_no, title, status), spv:profiles!spv_id(*), technicians:work_order_technicians(technician:profiles!technician_id(*))';
 
 /**
  * Filter untuk .or(): WO yang bisa dilihat SPV — departemennya sendiri, ATAU WO manapun

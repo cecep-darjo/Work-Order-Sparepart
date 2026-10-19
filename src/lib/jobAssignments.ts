@@ -9,6 +9,7 @@ export type JobStatus = 'assigned' | 'on_the_way' | 'in_progress' | 'done' | 'ap
 export type JobPriority = 'low' | 'normal' | 'high' | 'urgent';
 
 export type JobPerson = { id: string; full_name: string; username?: string | null };
+export type AssignedTechnician = { technician_id: string; technician: JobPerson | null };
 
 export type JobPhoto = {
   id: string;
@@ -36,7 +37,9 @@ export type JobAssignment = {
   title: string;
   description: string | null;
   location: string;
-  technician_id: string;
+  equipment_id: string | null;
+  manual_equipment: string | null;
+  technician_id: string | null;
   deadline: string;
   priority: JobPriority;
   status: JobStatus;
@@ -51,10 +54,12 @@ export type JobAssignment = {
   reviewed_at: string | null;
   review_note: string | null;
   technician?: JobPerson | null;
+  assigned_technicians?: AssignedTechnician[];
   creator?: JobPerson | null;
   reviewer?: JobPerson | null;
   /** Pada daftar: hasil `photos:job_assignment_photos(count)`. */
   photos?: { count: number }[];
+  equipment?: { id: string; name: string; code: string | null; area?: { id: string; name: string } | null } | null;
 };
 
 /** Peran atasan: boleh membuat, memantau, dan meng-approve penugasan. */
@@ -68,10 +73,10 @@ export function isJobManager(role: Role | undefined | null): boolean {
 /* ------------------------------------------------------------------ */
 
 export const JOB_LIST_SELECT =
-  '*, technician:profiles!technician_id(id, full_name, username), creator:profiles!created_by(id, full_name), photos:job_assignment_photos(count)';
+  '*, technician:profiles!technician_id(id, full_name, username), assigned_technicians:job_assignment_technicians(technician_id, technician:profiles!technician_id(id, full_name, username)), creator:profiles!created_by(id, full_name), photos:job_assignment_photos(count), equipment:equipment(id, name, code, area:areas(id, name))';
 
 export const JOB_DETAIL_SELECT =
-  '*, technician:profiles!technician_id(id, full_name, username), creator:profiles!created_by(id, full_name), reviewer:profiles!reviewed_by(id, full_name)';
+  '*, technician:profiles!technician_id(id, full_name, username), assigned_technicians:job_assignment_technicians(technician_id, technician:profiles!technician_id(id, full_name, username)), creator:profiles!created_by(id, full_name), reviewer:profiles!reviewed_by(id, full_name), equipment:equipment(id, name, code, area:areas(id, name))';
 
 /* ------------------------------------------------------------------ */
 /* Label & warna                                                       */
