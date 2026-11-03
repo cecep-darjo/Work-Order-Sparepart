@@ -106,8 +106,8 @@ export default function FloatingChat() {
   }
 
   if (!profile) return null;
-  return <div className="fixed bottom-5 right-5 z-[60] sm:bottom-6 sm:right-6">
-    {open && !minimized && <section className="mb-3 flex h-[min(38rem,78vh)] w-[min(24rem,calc(100vw-2rem))] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+  return <div className="relative">
+    {open && !minimized && <section className="fixed right-3 top-[4.5rem] z-[60] flex h-[min(38rem,78vh)] max-h-[calc(100vh-5.5rem)] w-[min(24rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl sm:right-6">
       <header className="flex items-center gap-2 bg-blue-600 px-4 py-3 text-white"><MessageCircle className="h-5 w-5" /><div className="min-w-0 flex-1"><h2 className="text-sm font-semibold">Chat</h2><p className="text-[11px] text-blue-100">Pesan pribadi dan departemen</p></div>{selected && <button title="Daftar percakapan" onClick={() => setSelected(null)} className="rounded p-1 hover:bg-blue-500"><ChevronLeft className="h-4 w-4" /></button>}{creating && !selected && <button title="Kembali ke percakapan" onClick={() => { setCreating(false); setUsers([]); setQuery(''); }} className="rounded p-1 hover:bg-blue-500"><ChevronLeft className="h-4 w-4" /></button>}<button title="Minimalkan" onClick={() => setMinimized(true)} className="rounded p-1 hover:bg-blue-500"><Minus className="h-4 w-4" /></button><button title="Tutup" onClick={() => setOpen(false)} className="rounded p-1 hover:bg-blue-500"><X className="h-4 w-4" /></button></header>
       {error && <div className="border-b border-rose-100 bg-rose-50 px-3 py-2 text-xs text-rose-700">{error}<button className="float-right" onClick={() => setError(null)}>×</button></div>}
       {!selected ? <>
@@ -129,7 +129,9 @@ export default function FloatingChat() {
         <form onSubmit={(event) => void send(event)} className="flex items-end gap-2 border-t border-slate-100 p-2"><Textarea rows={2} maxLength={4000} aria-label="Tulis pesan" placeholder="Tulis pesan..." value={draft} onChange={(event) => setDraft(event.target.value)} /><Button type="submit" size="sm" disabled={busy || !draft.trim()} aria-label="Kirim pesan"><Send className="h-4 w-4" /></Button></form>
       </>}
     </section>}
-    {open && minimized && <button onClick={() => setMinimized(false)} className="mb-3 flex items-center gap-2 rounded-full bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-lg ring-1 ring-slate-200"><MessageCircle className="h-4 w-4 text-blue-600" />Chat{unreadTotal > 0 && <Badge className="bg-red-600 text-white">{unreadTotal}</Badge>}</button>}
-    {!open && <button onClick={() => { setOpen(true); setMinimized(false); }} aria-label={unreadTotal > 0 ? `Buka chat, ${unreadTotal} pesan belum dibaca` : 'Buka chat'} className="relative flex h-14 w-14 items-center justify-center rounded-full bg-blue-600 text-white shadow-xl ring-4 ring-white transition hover:scale-105 hover:bg-blue-700"><MessageCircle className="h-6 w-6" />{unreadTotal > 0 && <span className="absolute -right-1 -top-1 flex h-6 min-w-6 items-center justify-center rounded-full bg-red-600 px-1 text-xs font-bold text-white ring-2 ring-white">{unreadTotal > 99 ? '99+' : unreadTotal}</span>}</button>}
+    <button onClick={() => { if (open && !minimized) setOpen(false); else { setOpen(true); setMinimized(false); } }} aria-label={unreadTotal > 0 ? `Buka chat, ${unreadTotal} pesan belum dibaca` : 'Buka chat'} aria-expanded={open && !minimized} title="Chat" className="relative flex h-10 w-10 items-center justify-center rounded-lg border border-slate-200 bg-white shadow-sm transition hover:bg-slate-50">
+      <img src="/chat-hardhat.webp" alt="" className="h-9 w-9 object-contain" />
+      {unreadTotal > 0 && <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-bold text-white ring-2 ring-white">{unreadTotal > 99 ? '99+' : unreadTotal}</span>}
+    </button>
   </div>;
 }
