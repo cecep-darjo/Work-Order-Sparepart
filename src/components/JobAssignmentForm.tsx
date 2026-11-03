@@ -3,20 +3,24 @@ import { useAuth } from '@/context/AuthContext';
 import { STATUS_LABELS as WO_STATUS_LABELS, supabase, type Area, type Equipment, type WOStatus } from '@/lib/supabase';
 import { Button, Input, Label, Modal, Select, Textarea } from '@/components/ui';
 import { MultiPicker, SearchablePicker, type MultiOption, type PickerOption } from '@/components/Pickers';
+import { EquipmentTypeCheckboxes, equipmentTypeBadge } from '@/components/EquipmentTypeCheckboxes';
 import {
   JOB_PRIORITY_COLORS,
   JOB_PRIORITY_LABELS,
+  JOB_CATEGORY_LABELS,
   JOB_STATUS_LABELS,
   defaultDeadlineValue,
   jobErrorMessage,
   toLocalInputValue,
   type JobAssignment,
+  type JobCategory,
   type JobPerson,
   type JobPriority,
   type JobStatus,
 } from '@/lib/jobAssignments';
 
 const PRIORITIES: JobPriority[] = ['low', 'normal', 'high', 'urgent'];
+const CATEGORIES: JobCategory[] = ['perbaikan', 'modifikasi', 'tugas_lain', 'preventive_maintenance'];
 const ACTIVE_WO_STATUSES: WOStatus[] = ['assigned', 'analysis', 'on_progress', 'pending'];
 const COMPLETED_JOB_STATUSES: JobStatus[] = ['done', 'approved'];
 
@@ -52,10 +56,12 @@ export default function JobAssignmentForm({
 
   const [title, setTitle] = useState(job?.title ?? '');
   const [description, setDescription] = useState(job?.description ?? '');
+  const [workCategory, setWorkCategory] = useState<JobCategory>(job?.work_category ?? 'perbaikan');
   const [location, setLocation] = useState(job?.location ?? '');
   const [areaId, setAreaId] = useState('');
   const [areas, setAreas] = useState<Area[]>([]);
   const [equipmentId, setEquipmentId] = useState(job?.equipment_id ?? '');
+  const [equipmentTypeFilter, setEquipmentTypeFilter] = useState<string[]>([]);
   const [manualEquipment, setManualEquipment] = useState(job?.manual_equipment ?? '');
   const [equipmentOptions, setEquipmentOptions] = useState<(Equipment & { area?: { name: string } | null })[]>([]);
   const [loadingEquipment, setLoadingEquipment] = useState(true);
@@ -77,7 +83,7 @@ export default function JobAssignmentForm({
   useEffect(() => {
     let cancelled = false;
     Promise.all([
-      supabase.from('equipment').select('id, area_id, name, code, created_at, area:areas(name)').order('name'),
+      supabase.from('equipment').select('id, area_id, name, code, equipment_types, created_at, area:areas(name)').order('name'),
       supabase.from('areas').select('*').order('name'),
     ]).then(([equipmentRes, areaRes]) => {
       if (cancelled) return;
@@ -98,12 +104,14 @@ export default function JobAssignmentForm({
 
   const equipmentPickerOptions = useMemo<PickerOption[]>(() => equipmentOptions
     .filter((eq) => !areaId || eq.area_id === areaId)
+    .filter((eq) => eq.id === equipmentId || equipmentTypeFilter.length === 0 || (eq.equipment_types ?? ['Lainnya']).some((type) => equipmentTypeFilter.includes(type)))
     .map((eq) => ({
       value: eq.id,
       label: eq.name,
       sublabel: [eq.code, eq.area?.name].filter(Boolean).join(' • '),
-      search: [eq.name, eq.code, eq.area?.name].filter(Boolean).join(' '),
-    })), [areaId, equipmentOptions]);
+      search: [eq.name, eq.code, eq.area?.name, ...(eq.equipment_types?.length ? eq.equipment_types : ['Lainnya'])].filter(Boolean).join(' '),
+      badges: (eq.equipment_types?.length ? eq.equipment_types : ['Lainnya']).map(equipmentTypeBadge),
+    })), [areaId, equipmentId, equipmentOptions, equipmentTypeFilter]);
 
   useEffect(() => {
     if (technicianIds.length === 0) {
@@ -195,6 +203,7 @@ export default function JobAssignmentForm({
       const payload = {
         title: title.trim(),
         description: description.trim() || null,
+        work_category: workCategory,
         location: location.trim(),
         equipment_id: manualEquipment.trim() ? null : (equipmentId || null),
         manual_equipment: manualEquipment.trim() || null,
@@ -270,6 +279,14 @@ export default function JobAssignmentForm({
         </div>
 
         <div>
+          <Label>Kategori pekerjaan *</Label>
+          <Select value={workCategory} onChange={(e) => setWorkCategory(e.target.value as JobCategory)}>
+            {CATEGORIES.map((category) => <option key={category} value={category}>{JOB_CATEGORY_LABELS[category]}</option>)}
+          </Select>
+          <p className="mt-1 text-xs text-slate-500">Hanya Jobs Assignment kategori Perbaikan yang dihitung pada Top 5 Mesin dashboard.</p>
+        </div>
+
+        <div>
           <Label>Lokasi / Area pekerjaan *</Label>
           <Select
             value={areaId}
@@ -290,6 +307,9 @@ export default function JobAssignmentForm({
 
         <div>
           <Label>Mesin target yang akan diperbaiki (opsional)</Label>
+          <div className="mb-2">
+            <EquipmentTypeCheckboxes label="Filter kategori mesin" value={equipmentTypeFilter} onChange={setEquipmentTypeFilter} />
+          </div>
           <SearchablePicker
             inline
             value={manualEquipment.trim() ? '' : equipmentId}
@@ -318,7 +338,7 @@ export default function JobAssignmentForm({
             <p className="mt-1 text-xs text-amber-600">Mesin target yang tersimpan tidak sesuai dengan lokasi pilihan. Pilih lokasi lain.</p>
           )}
           {!loadingEquipment && areaId && equipmentPickerOptions.length === 0 && (
-            <p className="mt-1 text-xs text-amber-600">Belum ada mesin target di lokasi ini. Nama mesin dapat diisi manual.</p>
+            <p className="mt-1 text-xs text-amber-600">Tidak ada mesin yang cocok dengan lokasi dan filter kategori ini. Nama mesin dapat diisi manual.</p>
           )}
         </div>
 
@@ -331,15 +351,15 @@ export default function JobAssignmentForm({
             options={technicians.filter((t) => (activeCounts[t.id] ?? 0) === 0 || technicianIds.includes(t.id)).map((t): MultiOption => ({
               value: t.id,
               label: t.full_name,
-              sublabel: `${activeCounts[t.id] ?? 0} tugas aktif`,
+              sublabel: [t.role === 'spv' ? 'SPV' : null, `${activeCounts[t.id] ?? 0} tugas aktif`].filter(Boolean).join(' · '),
             }))}
           />
           <p className="text-xs text-slate-500 mt-1">Penugasan dapat disimpan tanpa teknisi dan ditugaskan kemudian.</p>
           {technicians.length === 0 && (
-            <p className="text-xs text-amber-600 mt-1">Belum ada user aktif dengan role Teknisi.</p>
+            <p className="text-xs text-amber-600 mt-1">Belum ada user aktif dengan role Teknisi atau SPV.</p>
           )}
           {technicians.length > 0 && technicians.every((t) => (activeCounts[t.id] ?? 0) > 0) && technicianIds.length === 0 && (
-            <p className="text-xs text-amber-600 mt-1">Semua teknisi sedang memiliki Jobs Assignment aktif.</p>
+            <p className="text-xs text-amber-600 mt-1">Semua Teknisi dan SPV sedang memiliki Jobs Assignment aktif.</p>
           )}
           {technicianIds.length > 0 && (
             <div className="mt-2 rounded-lg border border-slate-200 bg-slate-50 p-3">

@@ -65,7 +65,9 @@ export type Profile = {
   role: Role;
   department_id: string | null;
   department_ids?: string[];
+  profile_department_ids?: string[];
   is_active: boolean;
+  work_schedule_type?: 'shift' | 'non_shift';
   created_at: string;
 };
 
@@ -89,6 +91,7 @@ export type Equipment = {
   area_id: string;
   name: string;
   code: string | null;
+  equipment_types?: ('HVAC' | 'Mesin' | 'LAF' | 'Lainnya')[];
   created_at: string;
 };
 
@@ -120,6 +123,7 @@ export type InventoryTransaction = {
   work_order_id: string | null;
   created_by: string;
   created_at: string;
+  transaction_date?: string;
   transaction_no?: string | null;
   stock_before?: number | null;
   source?: string | null;
@@ -213,7 +217,7 @@ export type ActivityLog = {
 
 // Kolom teknisi utama (work_orders.technician_id) diisi otomatis oleh database; UI memakai daftar `technicians`.
 export const WO_SELECT =
-  '*, department:departments(*), area:areas(*), equipment:equipment(*), job_assignment:job_assignments(id, job_no, title, status), spv:profiles!spv_id(*), technicians:work_order_technicians(technician:profiles!technician_id(*))';
+  'id,wo_number,created_at,date_created,department_id,area_id,equipment_id,job_assignment_id,problem_description,priority,work_types,status,spv_id,technician_id,requester_id,requester_name,requester_department,analysis,action_taken,result,pending_reason,cancel_reason,attachments,closed_at,updated_at,department:departments(id,name,code),area:areas(id,name,department_id),equipment:equipment(id,name,code,area_id,equipment_types),job_assignment:job_assignments(id,job_no,title,status),spv:profiles!spv_id(id,full_name),technicians:work_order_technicians(technician:profiles!technician_id(id,full_name))';
 
 /**
  * Filter untuk .or(): WO yang bisa dilihat SPV — departemennya sendiri, ATAU WO manapun

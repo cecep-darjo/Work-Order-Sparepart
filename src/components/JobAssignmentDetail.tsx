@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useAuth } from '@/context/AuthContext';
 import { supabase } from '@/lib/supabase';
 import { Badge, Button, Label, Modal, Spinner, Textarea } from '@/components/ui';
+import { EquipmentTypeBadges } from '@/components/EquipmentTypeCheckboxes';
 import {
   JOB_PHOTO_MAX_COUNT,
   JOB_PRIORITY_COLORS,
@@ -33,6 +34,7 @@ import {
   ImagePlus,
   MapPin,
   Navigation,
+  PauseCircle,
   Pencil,
   Play,
   RotateCcw,
@@ -79,7 +81,9 @@ export default function JobAssignmentDetail({
 
   const [reportNotes, setReportNotes] = useState('');
   const [reviewNote, setReviewNote] = useState('');
+  const [pendingReason, setPendingReason] = useState('');
   const [showCancel, setShowCancel] = useState(false);
+  const [showPending, setShowPending] = useState(false);
   const [preview, setPreview] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -135,10 +139,10 @@ export default function JobAssignmentDetail({
   }
 
   const isManager = profile.role === 'admin' || profile.role === 'ss' || profile.role === 'spv';
-  const canManageAssignment = profile.role === 'admin' || profile.role === 'ss' || (profile.role === 'spv' && job.created_by === profile.id);
-  const isAssignee = profile.role === 'teknisi' && (
+  const isAssignee = (profile.role === 'teknisi' || profile.role === 'spv') && (
     job.assigned_technicians?.some((member) => member.technician_id === profile.id) ?? job.technician_id === profile.id
   );
+  const canManageAssignment = profile.role === 'admin' || profile.role === 'ss' || (profile.role === 'spv' && job.created_by === profile.id && !isAssignee);
   const overdue = isJobOverdue(job);
   const finishedLate = wasFinishedLate(job);
   const working = job.status === 'on_the_way' || job.status === 'in_progress';
@@ -225,7 +229,7 @@ export default function JobAssignmentDetail({
   }
 
   async function approve() {
-    if (!confirm('Setujui laporan pekerjaan ini? Setelah disetujui, tugas dinyatakan selesai dan tidak dapat diubah.')) return;
+    if (!confirm('Setujui laporan pekerjaan ini? Komentar bersifat opsional. Jika JA terhubung ke WO, komentar ikut dicatat pada riwayat penutupan WO.')) return;
     await applyUpdate({ status: 'approved', review_note: reviewNote.trim() || null });
   }
 
@@ -240,6 +244,21 @@ export default function JobAssignmentDetail({
     if (await applyUpdate({ status: 'canceled', review_note: reviewNote.trim() })) {
       setReviewNote('');
       setShowCancel(false);
+    }
+  }
+
+  async function setPending() {
+    const reason = pendingReason.trim();
+    if (!reason) return alert('Isi alasan pending.');
+    if (await applyUpdate({ status: 'pending', pending_reason: reason })) {
+      setPendingReason('');
+      setShowPending(false);
+    }
+  }
+
+  async function resumePending() {
+    if (await applyUpdate({ status: 'in_progress', pending_reason: null })) {
+      setPendingReason('');
     }
   }
 
@@ -274,7 +293,7 @@ export default function JobAssignmentDetail({
             </InfoItem>
             <InfoItem icon={<MapPin className="w-4 h-4" />} label="Mesin target">
               {job.equipment
-                ? `${job.equipment.name}${job.equipment.code ? ` (${job.equipment.code})` : ''} · Area: ${job.equipment.area?.name ?? job.location}`
+                ? <span className="inline-flex flex-wrap items-center gap-1">{job.equipment.name}{job.equipment.code ? ` (${job.equipment.code})` : ''} · Area: {job.equipment.area?.name ?? job.location}<EquipmentTypeBadges types={job.equipment.equipment_types} /></span>
                 : job.manual_equipment || '-'}
             </InfoItem>
             <InfoItem icon={<User className="w-4 h-4" />} label="Teknisi">
@@ -293,6 +312,12 @@ export default function JobAssignmentDetail({
               <span className="block text-xs text-slate-500">{fmtJobDateTime(job.created_at)}</span>
             </InfoItem>
           </div>
+          {job.status === 'pending' && job.pending_reason && (
+            <div className="rounded-lg border border-orange-200 bg-orange-50 p-3">
+              <p className="text-xs font-semibold text-orange-800">Alasan Pending</p>
+              <p className="mt-1 text-sm text-orange-900 whitespace-pre-wrap">{job.pending_reason}</p>
+            </div>
+          )}
 
           {/* Penolakan terakhir */}
           {rejectedNote && (
@@ -469,15 +494,20 @@ export default function JobAssignmentDetail({
           {/* ------------------------ Aksi ATASAN ------------------------- */}
           {canManageAssignment && !isJobFinal(job.status) && (
             <div className="border-t border-slate-200 pt-4 space-y-3">
+              {job.status === 'pending' && (
+                <Button onClick={resumePending} disabled={acting}>
+                  <Play className="w-4 h-4" /> Lanjutkan Pekerjaan
+                </Button>
+              )}
               {job.status === 'done' && (
                 <>
                   <div>
-                    <Label>Catatan review {`(wajib bila menolak)`}</Label>
+                    <Label>Komentar penutupan / review (opsional saat approve, wajib saat menolak)</Label>
                     <Textarea
                       rows={2}
                       value={reviewNote}
                       onChange={(e) => setReviewNote(e.target.value)}
-                      placeholder="Mis. Foto kurang jelas, mohon tambahkan foto kondisi akhir"
+                      placeholder="Komentar opsional untuk approval; jika menolak, jelaskan pekerjaan yang perlu diperbaiki"
                     />
                   </div>
                   <div className="flex flex-wrap gap-2">
@@ -515,18 +545,46 @@ export default function JobAssignmentDetail({
                 </div>
               )}
 
-              {!showCancel && (
+              {showPending && (
+                <div className="rounded-xl border border-orange-200 bg-orange-50 p-4 space-y-3">
+                  <Label>Alasan Pending *</Label>
+                  <Textarea rows={2} value={pendingReason} onChange={(e) => setPendingReason(e.target.value)} placeholder="Jelaskan alasan pekerjaan ditunda..." />
+                  <div className="flex gap-2">
+                    <Button size="sm" onClick={setPending} disabled={acting}>
+                      <PauseCircle className="w-4 h-4" /> Simpan Pending
+                    </Button>
+                    <Button variant="secondary" size="sm" onClick={() => { setShowPending(false); setPendingReason(''); }} disabled={acting}>
+                      Batal
+                    </Button>
+                  </div>
+                </div>
+              )}
+
+              {!showCancel && !showPending && (
                 <div className="flex flex-wrap gap-2">
                   <Button variant="secondary" size="sm" onClick={() => onEdit(job)} disabled={acting}>
                     <Pencil className="w-4 h-4" />
                     Ubah Penugasan
                   </Button>
+                  {job.status === 'in_progress' && <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => {
+                      setPendingReason('');
+                      setShowPending(true);
+                    }}
+                    disabled={acting}
+                  >
+                    <PauseCircle className="w-4 h-4" />
+                    Pending
+                  </Button>}
                   <Button
                     variant="ghost"
                     size="sm"
                     className="text-red-600 hover:bg-red-50"
                     onClick={() => {
                       setReviewNote('');
+                      setShowPending(false);
                       setShowCancel(true);
                     }}
                     disabled={acting}

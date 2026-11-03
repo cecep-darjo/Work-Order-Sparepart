@@ -13,11 +13,12 @@ type TxRow = {
   issue_slip_no: string | null;
   created_by: string;
   created_at: string;
+  transaction_date: string;
   spare_part: { code: string; name: string; unit: string } | null;
 };
 
 const TX_SELECT =
-  'id, transaction_no, quantity, reference, notes, destination, recipient, issue_slip_no, created_by, created_at, spare_part:spare_parts(code, name, unit)';
+  'id, transaction_no, quantity, reference, notes, destination, recipient, issue_slip_no, created_by, created_at, transaction_date, spare_part:spare_parts(code, name, unit)';
 
 async function buildAndDownload(slipNo: string, rows: TxRow[]): Promise<void> {
   if (rows.length === 0) throw new Error('Data pengeluaran tidak ditemukan.');
@@ -34,7 +35,7 @@ async function buildAndDownload(slipNo: string, rows: TxRow[]): Promise<void> {
     subtitle: 'Spare Part - pengeluaran manual',
     fileName: `Pengeluaran-${slipNo}.pdf`,
     infoRows: [
-      ['No. Dokumen', slipNo, 'Tanggal', fmtDateTime(first.created_at)],
+      ['No. Dokumen', slipNo, 'Tanggal', fmtDateTime(`${first.transaction_date}T12:00:00`)],
       ['Dikeluarkan oleh', issuer?.full_name ?? '-', 'Tujuan', first.destination ?? '-'],
       ['Penerima', first.recipient ?? '-', 'Referensi', first.reference ?? '-'],
       ['Keperluan', first.notes ?? '-'],

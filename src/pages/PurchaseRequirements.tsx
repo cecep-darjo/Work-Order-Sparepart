@@ -133,6 +133,17 @@ async function uploadAttachmentFiles(prId: string, files: File[]): Promise<strin
   return urls;
 }
 
+function prAttachmentStoragePath(url: string): string | null {
+  const marker = '/purchase-requirement-files/';
+  const markerIndex = url.indexOf(marker);
+  if (markerIndex < 0) return null;
+  try {
+    return decodeURIComponent(url.slice(markerIndex + marker.length).split('?')[0]);
+  } catch {
+    return url.slice(markerIndex + marker.length).split('?')[0];
+  }
+}
+
 function PrItemsList({ row }: { row: PurchaseRequirement }) {
   const [showAll, setShowAll] = useState(false);
   const items = [...(row.items ?? [])].sort((a, b) => a.spare_part_name.localeCompare(b.spare_part_name));
@@ -858,7 +869,7 @@ function EditPrModal({
   );
 }
 
-export default function PurchaseRequirements() {
+export default function PurchaseRequirements({ listingOnly = false }: { listingOnly?: boolean }) {
   const { profile } = useAuth();
   const [loading, setLoading] = useState(true);
   const [rows, setRows] = useState<PurchaseRequirement[]>([]);
@@ -867,6 +878,7 @@ export default function PurchaseRequirements() {
   const [acting, setActing] = useState(false);
   const [editingRow, setEditingRow] = useState<PurchaseRequirement | null>(null);
   const [numberingId, setNumberingId] = useState<string | null>(null);
+  const [deletingPrId, setDeletingPrId] = useState<string | null>(null);
   const [numbering, setNumbering] = useState<Record<string, NumberingDraft>>({});
   const [attachmentFiles, setAttachmentFiles] = useState<File[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
@@ -1130,9 +1142,42 @@ export default function PurchaseRequirements() {
     await load();
   }
 
+  async function deletePurchaseRequirement(row: PurchaseRequirement) {
+    if (!profile || deletingPrId) return;
+    if (profile.role !== 'admin' && row.created_by !== profile.id) return;
+    const number = row.pr_no ? ` (${row.pr_no})` : '';
+    if (!window.confirm(`Hapus Purchase Requirement${number} secara permanen? Item dan lampirannya akan ikut dihapus.`)) return;
+
+    setDeletingPrId(row.id);
+    try {
+      const { error } = await supabase.rpc('delete_purchase_requirement', { p_pr_id: row.id });
+      if (error) throw error;
+
+      const paths = (row.attachment_files ?? [])
+        .map(prAttachmentStoragePath)
+        .filter((path): path is string => Boolean(path));
+      const { error: storageError } = paths.length
+        ? await supabase.storage.from('purchase-requirement-files').remove(paths)
+        : { error: null };
+      await load();
+      alert(storageError
+        ? 'Purchase Requirement berhasil dihapus, tetapi sebagian file lampiran gagal dibersihkan.'
+        : 'Purchase Requirement berhasil dihapus.');
+    } catch (error) {
+      const message = error instanceof Error
+        ? error.message
+        : error && typeof error === 'object' && typeof (error as { message?: unknown }).message === 'string'
+          ? (error as { message: string }).message
+          : String(error);
+      alert(`Gagal menghapus Purchase Requirement: ${message}`);
+    } finally {
+      setDeletingPrId(null);
+    }
+  }
+
   return (
     <div className="space-y-4">
-      {canCreate && (
+      {canCreate && !listingOnly && (
         <Card className="p-5 space-y-4">
           <div className="flex items-center justify-between gap-2">
             <h2 className="font-semibold text-slate-900">Buat Purchase Requirement</h2>
@@ -1337,7 +1382,7 @@ export default function PurchaseRequirements() {
 
       <Card className="p-5 space-y-3">
         <div className="flex items-center justify-between gap-2 flex-wrap">
-          <h2 className="font-semibold text-slate-900">Daftar Purchase Requirement</h2>
+          <h2 className="font-semibold text-slate-900">{listingOnly ? 'Daftar PR' : 'Daftar Purchase Requirement'}</h2>
           <div className="text-xs text-slate-500">Pending (hasil filter): <b>{pendingCount}</b></div>
         </div>
 
@@ -1398,6 +1443,17 @@ export default function PurchaseRequirements() {
                       {(profile.role === 'admin' || (profile.role === 'ss' && row.created_by === profile.id)) && (
                         <Button size="sm" variant="secondary" onClick={() => setEditingRow(row)}>
                           <Pencil className="w-3.5 h-3.5" /> Edit
+                        </Button>
+                      )}
+                      {(profile.role === 'admin' || row.created_by === profile.id) && (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          disabled={deletingPrId === row.id}
+                          onClick={() => void deletePurchaseRequirement(row)}
+                          className="text-red-600 hover:bg-red-50"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" /> {deletingPrId === row.id ? 'Menghapus...' : 'Hapus'}
                         </Button>
                       )}
                       <Badge className={STATUS_COLORS[row.status]}>{STATUS_LABELS[row.status]}</Badge>

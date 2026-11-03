@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { AuthProvider, useAuth } from '@/context/AuthContext';
 import { ActionItemsProvider } from '@/context/ActionItemsContext';
 import Login from '@/pages/Login';
@@ -15,13 +15,40 @@ import Bons from '@/pages/Bons';
 import AdminPanel from '@/pages/AdminPanel';
 import ActivityLogPage from '@/pages/ActivityLogPage';
 import UserSettings from '@/pages/UserSettings';
+import Portal from '@/pages/Portal';
+import PreventiveMaintenance from '@/pages/PreventiveMaintenance';
+import Chat from '@/pages/Chat';
 import { Spinner } from '@/components/ui';
 import { isSupabaseConfigured } from '@/lib/supabase';
 
 function AppContent() {
   const { session, profile, loading } = useAuth();
-  const [page, setPage] = useState<PageKey>('dashboard');
+  const [page, setPage] = useState<PageKey>('portal');
   const [selectedWO, setSelectedWO] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!session || !profile?.is_active) return;
+
+    const rootRoute = { page: 'portal' as PageKey, selectedWO: null as string | null };
+    const currentState = window.history.state;
+    window.history.replaceState({ ...currentState, engwoRoute: rootRoute }, '');
+
+    const handlePopState = (event: PopStateEvent) => {
+      const route = event.state?.engwoRoute as { page: PageKey; selectedWO: string | null } | undefined;
+      if (route) {
+        setPage(route.page);
+        setSelectedWO(route.selectedWO);
+        return;
+      }
+
+      // Recover gracefully if the browser history entry has no app route data.
+      setPage('portal');
+      setSelectedWO(null);
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [session, profile?.is_active]);
 
   if (loading) {
     return (
@@ -48,25 +75,37 @@ function AppContent() {
   }
 
   function navigate(p: PageKey) {
+    const route = { page: p, selectedWO: null };
+    window.history.pushState({ engwoRoute: route }, '');
     setSelectedWO(null);
     setPage(p);
+  }
+
+  function openWorkOrder(woId: string) {
+    const route = { page, selectedWO: woId };
+    window.history.pushState({ engwoRoute: route }, '');
+    setSelectedWO(woId);
   }
 
   return (
     <ActionItemsProvider refreshKey={`${page}:${selectedWO ?? ''}`}>
     <Layout currentPage={page} onNavigate={navigate}>
       {selectedWO ? (
-        <WorkOrderDetail woId={selectedWO} onBack={() => setSelectedWO(null)} />
+        <WorkOrderDetail woId={selectedWO} onBack={() => window.history.back()} />
       ) : (
         <>
-          {page === 'dashboard' && <Dashboard onNavigate={navigate} onOpenWO={setSelectedWO} />}
-          {page === 'workorders' && <WorkOrders onSelectWO={setSelectedWO} />}
+          {page === 'dashboard' && <Dashboard onNavigate={navigate} onOpenWO={openWorkOrder} />}
+          {page === 'portal' && <Portal onNavigate={navigate} />}
+          {page === 'workorders' && <WorkOrders onSelectWO={openWorkOrder} />}
           {page === 'job_assignments' && <JobAssignments />}
+          {page === 'preventive_maintenance' && <PreventiveMaintenance />}
+          {page === 'chat' && <Chat />}
           {page === 'spareparts' && <SpareParts />}
           {page === 'transactions' && <Transactions />}
           {page === 'goods_receipts' && <GoodsReceipts />}
           {page === 'bons' && <Bons />}
           {page === 'purchase_requirements' && <PurchaseRequirements />}
+          {page === 'pr_list' && <PurchaseRequirements listingOnly />}
           {page === 'inventory' && <SpareParts lowStockOnly />}
           {page === 'master_wo' && <AdminPanel scope="wo" />}
           {page === 'master_inventory' && <AdminPanel scope="inventory" />}

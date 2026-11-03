@@ -20,6 +20,7 @@ type TxRow = {
   work_order_id: string | null;
   transaction_no: string | null;
   created_at: string;
+  transaction_date: string;
   spare_part: { code: string; name: string; unit: string; current_stock: number } | null;
 };
 
@@ -64,7 +65,7 @@ export default function EditTransactionModal({
   const [docLines, setDocLines] = useState(1);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  const [form, setForm] = useState({ reference: '', notes: '', source: '', destination: '', recipient: '' });
+  const [form, setForm] = useState({ reference: '', notes: '', source: '', destination: '', recipient: '', transaction_date: '' });
   const [newQty, setNewQty] = useState<number>(0);
   const [keptFiles, setKeptFiles] = useState<string[]>([]);
   const [newFiles, setNewFiles] = useState<File[]>([]);
@@ -78,7 +79,7 @@ export default function EditTransactionModal({
       const { data, error } = await supabase
         .from('inventory_transactions')
         .select(
-          'id, type, quantity, reference, notes, source, destination, recipient, gr_no, gr_kind, gr_attachments, issue_slip_no, work_order_id, transaction_no, created_at, spare_part:spare_parts(code, name, unit, current_stock)'
+          'id, type, quantity, reference, notes, source, destination, recipient, gr_no, gr_kind, gr_attachments, issue_slip_no, work_order_id, transaction_no, created_at, transaction_date, spare_part:spare_parts(code, name, unit, current_stock)'
         )
         .eq('id', txId)
         .maybeSingle();
@@ -106,6 +107,7 @@ export default function EditTransactionModal({
         source: row.source ?? '',
         destination: row.destination ?? '',
         recipient: row.recipient ?? '',
+        transaction_date: row.transaction_date,
       });
       setNewQty(Number(row.quantity));
       setKeptFiles(row.gr_attachments ?? []);
@@ -140,6 +142,8 @@ export default function EditTransactionModal({
     );
   }, [tx, form, newFiles, keptFiles]);
 
+  const dateChanged = !!tx && form.transaction_date !== tx.transaction_date;
+
   const stockPreview = useMemo(() => {
     if (!tx || !tx.spare_part || !qtyChanged) return null;
     const sign = tx.type === 'stock_out' ? -1 : 1;
@@ -165,7 +169,7 @@ export default function EditTransactionModal({
       alert('Alasan perubahan wajib diisi.');
       return;
     }
-    if (!qtyChanged && !docChanged) {
+    if (!qtyChanged && !docChanged && !dateChanged) {
       alert('Tidak ada perubahan untuk disimpan.');
       return;
     }
@@ -209,6 +213,19 @@ export default function EditTransactionModal({
         }
       }
 
+      if (dateChanged) {
+        const { error } = await supabase.rpc('inventory_update_transaction_date', {
+          p_tx_id: tx.id,
+          p_transaction_date: form.transaction_date,
+          p_reason: reason.trim(),
+        });
+        if (error) {
+          alert('Data lain tersimpan, tetapi tanggal transaksi gagal diperbarui: ' + error.message);
+          await onSaved();
+          return;
+        }
+      }
+
       await onSaved();
     } catch (e) {
       alert('Gagal menyimpan: ' + (e instanceof Error ? e.message : String(e)));
@@ -241,7 +258,7 @@ export default function EditTransactionModal({
               <p className="text-xs text-slate-400">Transaksi</p>
               <p className="font-medium text-slate-800">{TX_TYPE_LABELS[tx.type]} • {tx.transaction_no ?? '-'}</p>
               <p className="text-xs text-slate-500">
-                {new Date(tx.created_at).toLocaleString('id-ID')}
+                {new Date(`${tx.transaction_date}T00:00:00`).toLocaleDateString('id-ID')}
                 {tx.gr_kind && ` • ${GR_KIND_LABELS[tx.gr_kind]}`}
               </p>
             </div>
@@ -285,6 +302,10 @@ export default function EditTransactionModal({
               )}
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <Label>Tanggal Transaksi</Label>
+                <Input type="date" value={form.transaction_date} onChange={(e) => setForm((f) => ({ ...f, transaction_date: e.target.value }))} disabled={saving} />
+              </div>
               <div>
                 <Label>Referensi</Label>
                 <Input value={form.reference} onChange={(e) => setForm((f) => ({ ...f, reference: e.target.value }))} disabled={saving} />
@@ -358,7 +379,7 @@ export default function EditTransactionModal({
 
           <div className="flex justify-end gap-2">
             <Button variant="secondary" onClick={onClose} disabled={saving}>Batal</Button>
-            <Button onClick={save} disabled={saving || reason.trim().length < 3 || (!qtyChanged && !docChanged)}>
+            <Button onClick={save} disabled={saving || reason.trim().length < 3 || (!qtyChanged && !docChanged && !dateChanged)}>
               {saving ? 'Menyimpan...' : 'Simpan Perubahan'}
             </Button>
           </div>

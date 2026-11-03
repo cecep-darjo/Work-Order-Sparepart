@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { LucideIcon } from 'lucide-react';
 import { ClipboardCheck, Lock, ShieldCheck, UserPlus, Wrench } from 'lucide-react';
-import { supabase, stockStatus, type Profile, type SparePart, type WorkOrder } from '@/lib/supabase';
+import { supabase, type Profile, type SparePart, type WorkOrder } from '@/lib/supabase';
 import type { PageKey } from '@/components/Layout';
 
 /**
@@ -139,19 +139,19 @@ type ActionableWo = Pick<WorkOrder, 'status' | 'spv_id' | 'department_id'> & { t
 export function woActionsFor(wo: ActionableWo, profile: Profile, req?: WoPartRequestCounts): WoActionKind[] {
   const out: WoActionKind[] = [];
   const role = profile.role;
-  const isAdminOrSs = role === 'admin' || role === 'ss';
+  const isAdminOrScopedSs = role === 'admin' || (role === 'ss' && (profile.profile_department_ids ?? []).includes(wo.department_id));
   const isSpv = role === 'spv' && (profile.department_ids?.includes(wo.department_id) || profile.department_id === wo.department_id || wo.spv_id === profile.id);
   const techCount = (wo.technicians ?? []).length;
 
-  if (isAdminOrSs && wo.status === 'new' && !wo.spv_id) out.push('assign_spv');
+  if (isAdminOrScopedSs && wo.status === 'new' && !wo.spv_id) out.push('assign_spv');
   if (isSpv && wo.status === 'assigned' && techCount === 0) out.push('assign_tech');
 
-  if ((isAdminOrSs || isSpv) && wo.status !== 'closed' && wo.status !== 'verified' && (req?.pending ?? 0) > 0) out.push('approve_part');
+  if ((isAdminOrScopedSs || isSpv) && wo.status !== 'closed' && wo.status !== 'verified' && (req?.pending ?? 0) > 0) out.push('approve_part');
   if (role === 'admin' && wo.status !== 'closed' && wo.status !== 'verified' && (req?.ssApproved ?? 0) > 0)
     out.push('process_part');
 
   if (isSpv && wo.status === 'done') out.push('verify');
-  if (isAdminOrSs && wo.status === 'verified') out.push('close');
+  if (isAdminOrScopedSs && wo.status === 'verified') out.push('close');
 
   if (role === 'teknisi' && wo.status === 'assigned') out.push('start');
   if (role === 'teknisi' && (wo.status === 'analysis' || wo.status === 'on_progress')) out.push('work');
@@ -163,10 +163,16 @@ export async function fetchPartRequestCounts(profile: Profile): Promise<Record<s
   if (profile.role !== 'admin' && profile.role !== 'ss' && profile.role !== 'spv') return {};
   let query = supabase
     .from('wo_part_requests')
-    .select('work_order_id, status')
+    .select('work_order_id, status, work_order:work_orders!inner(department_id, spv_id)')
     .in('status', ['pending', 'ss_approved'])
     .limit(1000);
-  // SPV hanya melihat permintaan part pada WO yang menjadi PIC-nya.
+  // SS hanya melihat notifikasi permintaan part untuk departemen profilnya.
+  if (profile.role === 'ss') {
+    const departmentIds = profile.profile_department_ids ?? [];
+    if (!departmentIds.length) return {};
+    query = query.in('work_order.department_id', departmentIds);
+  }
+  // SPV hanya dapat menindaklanjuti permintaan part pada WO yang menjadi PIC-nya.
   if (profile.role === 'spv') query = query.eq('work_order.spv_id', profile.id);
   const { data } = await query;
   const map: Record<string, WoPartRequestCounts> = {};
@@ -180,8 +186,12 @@ export async function fetchPartRequestCounts(profile: Profile): Promise<Record<s
 
 type Role = Profile['role'];
 
-const POLL_MS = 30000;
+// Keep the bell current while the app is being used, and let push handle background alerts.
+const POLL_MS = 60000;
+const STOCK_WATCHLIST_CACHE_MS = 120000;
 const LIMIT = 200;
+type LowStockPart = Pick<SparePart, 'id' | 'code' | 'name' | 'unit' | 'min_stock' | 'current_stock'>;
+let stockWatchlistCache: { fetchedAt: number; data: LowStockPart[] } | null = null;
 
 type WoRow = Pick<WorkOrder, 'id' | 'wo_number' | 'problem_description' | 'status' | 'spv_id' | 'department_id'> & {
   technicians: { technician_id: string }[] | null;
@@ -205,27 +215,22 @@ function woRows(rows: WoRow[]): ActionRow[] {
 }
 
 /**
- * Part yang dipantau untuk alert stok menipis: hanya yang punya stok minimum > 0
- * (min 0 = tidak perlu distok, tidak pernah di-alert). Dimuat bertahap agar tidak terpotong
- * batas ±1.000 baris/query; umumnya cukup satu query.
+ * Ambil hanya part yang benar-benar rendah stok. RPC menghindari mengirim seluruh master
+ * spare part ke browser setiap lonceng dimuat.
  */
 async function fetchStockWatchlist(): Promise<{ data: unknown[] }> {
-  const chunk = 1000;
-  const all: unknown[] = [];
-  for (let offset = 0; ; offset += chunk) {
-    const { data, error } = await supabase
-      .from('spare_parts')
-      .select('id, code, name, unit, min_stock, max_stock, current_stock')
-      .gt('min_stock', 0)
-      .order('current_stock', { ascending: true })
-      .order('id', { ascending: true })
-      .range(offset, offset + chunk - 1);
-    if (error) break;
-    const rows = data ?? [];
-    all.push(...rows);
-    if (rows.length < chunk) break;
+  if (stockWatchlistCache && Date.now() - stockWatchlistCache.fetchedAt < STOCK_WATCHLIST_CACHE_MS) {
+    return { data: stockWatchlistCache.data };
   }
-  return { data: all };
+  const { data, error } = await supabase.rpc('get_low_stock_spare_parts');
+  if (error) {
+    // Keep the last complete snapshot rather than caching a partial result.
+    if (stockWatchlistCache) return { data: stockWatchlistCache.data };
+    return { data: [] };
+  }
+  const rows = (data ?? []) as LowStockPart[];
+  stockWatchlistCache = { fetchedAt: Date.now(), data: rows };
+  return { data: rows };
 }
 
 async function buildGroups(profile: Profile): Promise<ActionGroup[]> {
@@ -250,18 +255,20 @@ async function buildGroups(profile: Profile): Promise<ActionGroup[]> {
   const prStatuses: string[] = [];
   if (isAdmin || isSS || isSpv) prStatuses.push('pending'); // approval SPV/SS/admin
   if (isAdmin || isInv) prStatuses.push('ss_approved'); // proses inventory
-  const partReqQuery = prStatuses.length
+  const partDepartmentIds = profile.profile_department_ids ?? [];
+  const partReqQuery = prStatuses.length && !(isSS && !partDepartmentIds.length)
     ? supabase
         .from('wo_part_requests')
-        .select('id, request_no, status, work_order_id, work_order:work_orders(wo_number)')
+        .select('id, request_no, status, work_order_id, work_order:work_orders!inner(wo_number, department_id, spv_id)')
         .in('status', prStatuses)
         .order('requested_at', { ascending: true })
         .limit(LIMIT)
     : null;
   // SPV hanya melihat permintaan part pada WO yang menjadi PIC-nya.
-  const reqPromise = isSpv && partReqQuery
-    ? partReqQuery.eq('work_order.spv_id', profile.id)
-    : (partReqQuery ?? Promise.resolve({ data: [] as unknown[] }));
+  let scopedPartReqQuery = partReqQuery;
+  if (scopedPartReqQuery && isSS) scopedPartReqQuery = scopedPartReqQuery.in('work_order.department_id', partDepartmentIds);
+  if (scopedPartReqQuery && isSpv) scopedPartReqQuery = scopedPartReqQuery.eq('work_order.spv_id', profile.id);
+  const reqPromise = scopedPartReqQuery ?? Promise.resolve({ data: [] as unknown[] });
 
   // ---- Bon sparepart, PR numbering, stok menipis (admin / inventory) -------
   const staff = isAdmin || isInv;
@@ -288,11 +295,15 @@ async function buildGroups(profile: Profile): Promise<ActionGroup[]> {
   const isManager = isAdmin || isSS || isSpv;
   let jobQuery = supabase
     .from('job_assignments')
-    .select('id, job_no, title, status, deadline, technician:profiles!technician_id(full_name), assigned_technicians:job_assignment_technicians!inner(technician_id, technician:profiles!technician_id(full_name))')
+    .select('id, job_no, title, status, deadline, created_by, technician:profiles!technician_id(full_name), assigned_technicians:job_assignment_technicians!inner(technician_id, technician:profiles!technician_id(full_name))')
     .order('deadline', { ascending: true })
     .limit(LIMIT);
   if (isTech) jobQuery = jobQuery.eq('assigned_technicians.technician_id', profile.id).in('status', ['assigned', 'on_the_way', 'in_progress']);
-  else jobQuery = jobQuery.in('status', ['assigned', 'on_the_way', 'in_progress', 'done']);
+  else {
+    jobQuery = jobQuery.in('status', ['assigned', 'on_the_way', 'in_progress', 'done']);
+    // SPV hanya dapat menindaklanjuti tugas yang dibuatnya sendiri.
+    if (isSpv) jobQuery = jobQuery.eq('created_by', profile.id);
+  }
   const jobPromise = isTech || isManager ? jobQuery : Promise.resolve({ data: [] as unknown[] });
 
   const [wos, reqRes, bonRes, numRes, stockRes, jobRes] = await Promise.all([
@@ -331,6 +342,7 @@ async function buildGroups(profile: Profile): Promise<ActionGroup[]> {
     title: string;
     status: string;
     deadline: string;
+    created_by: string;
     technician: { full_name: string } | null;
     assigned_technicians?: { technician: { full_name: string } | null }[];
   };
@@ -399,7 +411,7 @@ async function buildGroups(profile: Profile): Promise<ActionGroup[]> {
     request_no: string;
     status: string;
     work_order_id: string;
-    work_order: { wo_number: string } | null;
+    work_order: { wo_number: string; department_id: string; spv_id: string | null } | null;
   };
   const reqs = (reqRes.data as unknown as ReqRow[]) ?? [];
   const toRow = (r: ReqRow): ActionRow => ({
@@ -468,7 +480,7 @@ async function buildGroups(profile: Profile): Promise<ActionGroup[]> {
     });
 
   // Stok menipis
-  const low = ((stockRes.data as unknown as SparePart[]) ?? []).filter((p) => stockStatus(p) === 'low');
+  const low = (stockRes.data as LowStockPart[]) ?? [];
   if (staff && low.length)
     groups.push({
       key: 'low_stock',
@@ -491,16 +503,20 @@ export function useActionItems(profile: Profile | null) {
   const [groups, setGroups] = useState<ActionGroup[]>([]);
   const [loading, setLoading] = useState(true);
   const alive = useRef(true);
+  const requestSeq = useRef(0);
 
   const reload = useCallback(
     async (silent = false) => {
+      const requestId = ++requestSeq.current;
       if (!profile) return;
       if (!silent) setLoading(true);
       try {
         const g = await buildGroups(profile);
-        if (alive.current) setGroups(g);
+        // Older overlapping polls must not overwrite a newer snapshot (for example,
+        // a refresh started before a Jobs Assignment was deleted).
+        if (alive.current && requestId === requestSeq.current) setGroups(g);
       } finally {
-        if (alive.current) setLoading(false);
+        if (alive.current && requestId === requestSeq.current) setLoading(false);
       }
     },
     [profile],
@@ -510,7 +526,9 @@ export function useActionItems(profile: Profile | null) {
     alive.current = true;
     reload();
     // Permintaan/bon/WO baru muncul otomatis: polling berkala + saat tab kembali aktif.
-    const timer = setInterval(() => reload(true), POLL_MS);
+    const timer = setInterval(() => {
+      if (document.visibilityState === 'visible') void reload(true);
+    }, POLL_MS);
     const onVisible = () => {
       if (document.visibilityState === 'visible') reload(true);
     };

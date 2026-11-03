@@ -500,8 +500,8 @@ export default function GoodsReceipts() {
             )}
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+          <div className="w-full overflow-hidden">
+            <table className="w-full table-fixed text-xs">
               <thead className="bg-slate-50 text-xs text-slate-500 uppercase">
                 <tr>
                   {th('No. GR', 'gr_no')}
@@ -517,17 +517,17 @@ export default function GoodsReceipts() {
               <tbody className="divide-y divide-slate-100">
                 {sorted.slice(0, shown).map((g) => (
                   <tr key={g.gr_no} className="hover:bg-slate-50">
-                    <td className="px-4 py-3 whitespace-nowrap">
+                    <td className="px-2 py-3 w-[11%] break-words">
                       <div className="font-medium text-slate-800">{g.gr_no}</div>
                       {g.gr_kind && <Badge className={KIND_COLORS[g.gr_kind]}>{GR_KIND_LABELS[g.gr_kind]}</Badge>}
                     </td>
-                    <td className="px-4 py-3 text-xs text-slate-500 whitespace-nowrap">{fmtDateTime(g.created_at)}</td>
-                    <td className="px-4 py-3 text-xs text-slate-600">{g.source ?? '-'}</td>
-                    <td className="px-4 py-3 text-xs text-slate-600 max-w-xs">{g.reference ?? '-'}</td>
-                    <td className="px-4 py-3">
+                    <td className="px-2 py-3 w-[12%] text-[11px] text-slate-500 break-words">{fmtDateTime(g.created_at)}</td>
+                    <td className="px-2 py-3 w-[14%] text-[11px] text-slate-600 truncate" title={g.source ?? ''}>{g.source ?? '-'}</td>
+                    <td className="hidden lg:table-cell px-2 py-3 w-[13%] text-[11px] text-slate-600 truncate" title={g.reference ?? ''}>{g.reference ?? '-'}</td>
+                    <td className="px-2 py-3 w-[10%]">
                       <Badge className={ITEM_KIND_COLORS[grItemKind(g)]}>{grItemKind(g)}</Badge>
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="px-2 py-3 w-[19%]">
                       <div className="font-medium text-slate-700">{g.lines.length} item</div>
                       <div
                         className="text-xs text-slate-400 max-w-xs truncate"
@@ -536,8 +536,8 @@ export default function GoodsReceipts() {
                         {itemSummary(g)}
                       </div>
                     </td>
-                    <td className="px-4 py-3 text-xs text-slate-600 whitespace-nowrap">{g.created_by ? names[g.created_by] ?? '-' : '-'}</td>
-                    <td className="px-4 py-3 text-right whitespace-nowrap">
+                    <td className="hidden xl:table-cell px-2 py-3 w-[10%] text-[11px] text-slate-600 truncate" title={g.created_by ? names[g.created_by] ?? '' : ''}>{g.created_by ? names[g.created_by] ?? '-' : '-'}</td>
+                    <td className="px-2 py-3 w-[11%] text-right">
                       <div className="flex items-center justify-end gap-2">
                         {g.attachments.length > 0 && (
                           <span className="inline-flex items-center gap-1 text-xs text-slate-500">

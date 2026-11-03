@@ -19,15 +19,47 @@ import {
 import { normalizeUsername, validatePassword, validateUsername } from '@/lib/authUsername';
 import { Card, Badge, Button, Input, Select, Label, Modal, Spinner } from '@/components/ui';
 import { MultiPicker } from '@/components/Pickers';
-import { Building2, MapPin, Cpu, Users, Plus, Pencil, Trash2, Tag, Ruler, Warehouse, Hash, FolderTree } from 'lucide-react';
+import { EquipmentTypeBadges, EquipmentTypeCheckboxes } from '@/components/EquipmentTypeCheckboxes';
+import { Building2, MapPin, Cpu, Users, Plus, Pencil, Trash2, Tag, Ruler, Warehouse, Hash, FolderTree, CalendarDays } from 'lucide-react';
 
-type Tab = 'departments' | 'areas' | 'equipment' | 'users' | 'categories' | 'units' | 'locations' | 'suppliers' | 'gr_numbers' | 'groups';
+type Tab = 'departments' | 'areas' | 'equipment' | 'users' | 'pm_settings' | 'categories' | 'units' | 'locations' | 'suppliers' | 'gr_numbers' | 'wo_numbers' | 'groups';
 type MasterScope = 'wo' | 'inventory';
+type WoSortTab = 'departments' | 'areas' | 'equipment' | 'users';
 type SimpleMaster = 'categories' | 'units' | 'locations' | 'suppliers';
 type GRKind = 'credit' | 'cash' | 'import';
-const WO_TABS: Tab[] = ['departments', 'areas', 'equipment', 'users'];
+const WO_TABS: Tab[] = ['departments', 'areas', 'equipment', 'users', 'pm_settings', 'wo_numbers'];
 const INVENTORY_TABS: Tab[] = ['categories', 'units', 'locations', 'suppliers', 'gr_numbers', 'groups'];
 const EQUIPMENT_PAGE_SIZE = 10;
+const WO_SORT_OPTIONS: Record<WoSortTab, { value: string; label: string }[]> = {
+  departments: [
+    { value: 'name-asc', label: 'Nama A–Z' },
+    { value: 'name-desc', label: 'Nama Z–A' },
+    { value: 'code-asc', label: 'Kode A–Z' },
+    { value: 'code-desc', label: 'Kode Z–A' },
+  ],
+  areas: [
+    { value: 'name-asc', label: 'Nama A–Z' },
+    { value: 'name-desc', label: 'Nama Z–A' },
+  ],
+  equipment: [
+    { value: 'name-asc', label: 'Nama A–Z' },
+    { value: 'name-desc', label: 'Nama Z–A' },
+    { value: 'code-asc', label: 'Kode A–Z' },
+    { value: 'code-desc', label: 'Kode Z–A' },
+    { value: 'area-asc', label: 'Area A–Z' },
+    { value: 'area-desc', label: 'Area Z–A' },
+    { value: 'category-asc', label: 'Kategori A–Z' },
+    { value: 'category-desc', label: 'Kategori Z–A' },
+  ],
+  users: [
+    { value: 'name-asc', label: 'Nama A–Z' },
+    { value: 'name-desc', label: 'Nama Z–A' },
+    { value: 'username-asc', label: 'Username A–Z' },
+    { value: 'username-desc', label: 'Username Z–A' },
+    { value: 'role-asc', label: 'Role A–Z' },
+    { value: 'role-desc', label: 'Role Z–A' },
+  ],
+};
 const SIMPLE_TABLE: Record<SimpleMaster, string> = {
   categories: 'part_categories',
   units: 'units_of_measure',
@@ -38,15 +70,36 @@ function isSimpleMaster(t: Tab): t is SimpleMaster {
   return t === 'categories' || t === 'units' || t === 'locations' || t === 'suppliers';
 }
 
+function sortRows<T>(
+  rows: T[],
+  sortMode: string,
+  fields: Record<string, (row: T) => string | null | undefined>,
+): T[] {
+  const divider = sortMode.lastIndexOf('-');
+  const field = sortMode.slice(0, divider);
+  const direction = sortMode.slice(divider + 1) === 'desc' ? -1 : 1;
+  const value = fields[field];
+  if (!value) return rows;
+  return [...rows].sort((a, b) =>
+    (value(a) ?? '').localeCompare(value(b) ?? '', undefined, { numeric: true, sensitivity: 'base' }) * direction,
+  );
+}
+
 export default function AdminPanel({ scope }: { scope: MasterScope }) {
   const { profile } = useAuth();
   const [tab, setTab] = useState<Tab>(scope === 'wo' ? 'departments' : 'categories');
   const [loading, setLoading] = useState(true);
 
   const [departments, setDepartments] = useState<Department[]>([]);
+  const [departmentPMSettings, setDepartmentPMSettings] = useState<Record<string, boolean>>({});
   const [areas, setAreas] = useState<Area[]>([]);
   const [equipment, setEquipment] = useState<(Equipment & { area?: Area })[]>([]);
   const [equipmentPage, setEquipmentPage] = useState(1);
+  const [equipmentAreaFilter, setEquipmentAreaFilter] = useState('');
+  const [equipmentTypeFilter, setEquipmentTypeFilter] = useState<string[]>([]);
+  const [woSort, setWoSort] = useState<Record<WoSortTab, string>>({
+    departments: 'name-asc', areas: 'name-asc', equipment: 'name-asc', users: 'name-asc',
+  });
   const [users, setUsers] = useState<Profile[]>([]);
   const [categories, setCategories] = useState<PartCategory[]>([]);
   const [units, setUnits] = useState<UnitOfMeasure[]>([]);
@@ -57,6 +110,8 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
   const [groupSort, setGroupSort] = useState<'name-asc' | 'name-desc' | 'code-asc' | 'code-desc'>('name-asc');
   const [latestGrNumbers, setLatestGrNumbers] = useState<Record<GRKind, string | null>>({ credit: null, cash: null, import: null });
   const [grForm, setGrForm] = useState<Record<GRKind, number>>({ credit: 1, cash: 1, import: 1 });
+  const [woNumberStatus, setWoNumberStatus] = useState<{ year: number; last_no: number; last_wo_number: string | null }>({ year: new Date().getFullYear(), last_no: 0, last_wo_number: null });
+  const [woLastNoForm, setWoLastNoForm] = useState(0);
 
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<{ type: Tab; id?: string; data?: Record<string, unknown> } | null>(null);
@@ -66,7 +121,7 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
   // Form state
   const [deptForm, setDeptForm] = useState({ name: '', code: '' });
   const [areaForm, setAreaForm] = useState({ name: '' });
-  const [equipForm, setEquipForm] = useState({ area_id: '', name: '', code: '' });
+  const [equipForm, setEquipForm] = useState({ area_id: '', name: '', code: '', equipment_types: ['Lainnya'] as string[] });
   const [userForm, setUserForm] = useState({
     username: '',
     full_name: '',
@@ -74,17 +129,42 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
     department_id: '',
     department_ids: [] as string[],
     password: '',
+    work_schedule_type: 'non_shift' as 'shift' | 'non_shift',
   });
   const [simpleForm, setSimpleForm] = useState({ name: '', code: '' });
   const [groupForm, setGroupForm] = useState({ name: '', kode: '', use_abjad: true });
 
   useEffect(() => {
-    setTab(scope === 'wo' ? 'departments' : 'categories');
+    setTab(scope === 'wo' ? (profile?.role === 'spv' ? 'areas' : 'departments') : 'categories');
     loadAll();
-  }, [scope]);
+  }, [scope, profile?.role]);
 
-  const equipmentPageCount = Math.max(1, Math.ceil(equipment.length / EQUIPMENT_PAGE_SIZE));
-  const pagedEquipment = equipment.slice((equipmentPage - 1) * EQUIPMENT_PAGE_SIZE, equipmentPage * EQUIPMENT_PAGE_SIZE);
+  const sortedDepartments = sortRows(departments, woSort.departments, {
+    name: (row) => row.name,
+    code: (row) => row.code,
+  });
+  const sortedAreas = sortRows(areas, woSort.areas, { name: (row) => row.name });
+  const sortedEquipment = sortRows(equipment, woSort.equipment, {
+    name: (row) => row.name,
+    code: (row) => row.code,
+    area: (row) => row.area?.name,
+    category: (row) => (row.equipment_types ?? ['Lainnya']).join(', '),
+  });
+  const sortedUsers = sortRows(users, woSort.users, {
+    name: (row) => row.full_name,
+    username: (row) => row.username,
+    role: (row) => ROLE_LABELS[row.role],
+  });
+  const visibleEquipment = sortedEquipment.filter((row) => {
+    if (equipmentAreaFilter && row.area_id !== equipmentAreaFilter) return false;
+    if (equipmentTypeFilter.length > 0) {
+      const types = row.equipment_types?.length ? row.equipment_types : ['Lainnya'];
+      if (!equipmentTypeFilter.some((type) => types.includes(type))) return false;
+    }
+    return true;
+  });
+  const equipmentPageCount = Math.max(1, Math.ceil(visibleEquipment.length / EQUIPMENT_PAGE_SIZE));
+  const pagedEquipment = visibleEquipment.slice((equipmentPage - 1) * EQUIPMENT_PAGE_SIZE, equipmentPage * EQUIPMENT_PAGE_SIZE);
 
   useEffect(() => {
     if (equipmentPage > equipmentPageCount) setEquipmentPage(equipmentPageCount);
@@ -94,14 +174,17 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
     setLoading(true);
 
     if (scope === 'wo') {
-      const [{ data: d }, { data: a }, { data: e }, { data: u }, { data: ud }] = await Promise.all([
+      const [{ data: d }, { data: a }, { data: e }, { data: u }, { data: ud }, { data: woStatus }, { data: pmSettings }] = await Promise.all([
         supabase.from('departments').select('*').order('name'),
         supabase.from('areas').select('*').order('name'),
         supabase.from('equipment').select('*, area:areas(*)').order('name'),
         supabase.from('profiles').select('*').order('full_name'),
         supabase.from('profile_departments').select('profile_id, department_id'),
+        supabase.rpc('get_wo_numbering_status'),
+        supabase.from('department_pm_settings').select('department_id,pm_enabled'),
       ]);
       setDepartments((d as Department[]) ?? []);
+      setDepartmentPMSettings(Object.fromEntries(((pmSettings ?? []) as { department_id: string; pm_enabled: boolean }[]).map((setting) => [setting.department_id, setting.pm_enabled])));
       setAreas((a as unknown as Area[]) ?? []);
       setEquipment((e as unknown as (Equipment & { area?: Area })[]) ?? []);
       const departmentMap = new Map<string, string[]>();
@@ -112,6 +195,11 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
         ...user,
         department_ids: [...new Set([...(departmentMap.get(user.id) ?? []), ...(user.department_id ? [user.department_id] : [])])],
       })));
+      const status = woStatus as { year: number; last_no: number; last_wo_number: string | null } | null;
+      if (status) {
+        setWoNumberStatus(status);
+        setWoLastNoForm(status.last_no);
+      }
     } else {
       const [{ data: cat }, { data: un }, { data: loc }, sup, { data: gr }, { data: groupsData }, { data: transactions }, { data: serviceReceipts }] = await Promise.all([
         supabase.from('part_categories').select('*').order('name'),
@@ -156,8 +244,8 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
   function openCreate(type: Tab) {
     if (type === 'departments') setDeptForm({ name: '', code: '' });
     if (type === 'areas') setAreaForm({ name: '' });
-    if (type === 'equipment') setEquipForm({ area_id: '', name: '', code: '' });
-    if (type === 'users') setUserForm({ username: '', full_name: '', role: 'teknisi', department_id: '', department_ids: [], password: '' });
+    if (type === 'equipment') setEquipForm({ area_id: '', name: '', code: '', equipment_types: ['Lainnya'] });
+    if (type === 'users') setUserForm({ username: '', full_name: '', role: 'teknisi', department_id: '', department_ids: [], password: '', work_schedule_type: 'non_shift' });
     if (isSimpleMaster(type)) setSimpleForm({ name: '', code: '' });
     if (type === 'groups') setGroupForm({ name: '', kode: '', use_abjad: true });
     setEditing({ type });
@@ -167,7 +255,7 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
   function openEdit(type: Tab, id: string, data: Record<string, unknown>) {
     if (type === 'departments') setDeptForm({ name: data.name as string, code: data.code as string });
     if (type === 'areas') setAreaForm({ name: data.name as string });
-    if (type === 'equipment') setEquipForm({ area_id: data.area_id as string, name: data.name as string, code: (data.code as string) ?? '' });
+    if (type === 'equipment') setEquipForm({ area_id: data.area_id as string, name: data.name as string, code: (data.code as string) ?? '', equipment_types: (data.equipment_types as string[] | undefined) ?? ['Lainnya'] });
     if (type === 'users') {
       setUserForm({
         username: (data.username as string) ?? '',
@@ -176,6 +264,7 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
         department_id: (data.department_id as string) ?? '',
         department_ids: ((data.department_ids as string[] | undefined) ?? ((data.department_id as string | null) ? [data.department_id as string] : [])),
         password: '',
+        work_schedule_type: (data.work_schedule_type as 'shift' | 'non_shift') ?? 'non_shift',
       });
     }
     if (isSimpleMaster(type)) setSimpleForm({ name: data.name as string, code: data.code as string });
@@ -201,19 +290,49 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
         await supabase.from('departments').insert(deptForm);
       }
     } else if (editing.type === 'areas') {
+      if (!areaForm.name.trim()) {
+        alert('Nama area wajib diisi.');
+        setActing(false);
+        return;
+      }
+      let error: { message: string; code?: string } | null = null;
       if (editing.id) {
-        await supabase.from('areas').update({ name: areaForm.name.trim() }).eq('id', editing.id);
+        ({ error } = await supabase.from('areas').update({ name: areaForm.name.trim() }).eq('id', editing.id));
       } else {
-        await supabase.from('areas').insert({ name: areaForm.name.trim() });
+        ({ error } = await supabase.from('areas').insert({ name: areaForm.name.trim() }));
+      }
+      if (error) {
+        alert(`Gagal menyimpan area: ${error.message}`);
+        setActing(false);
+        return;
       }
     } else if (editing.type === 'equipment') {
+      if (!equipForm.area_id) {
+        alert('Area wajib dipilih.');
+        setActing(false);
+        return;
+      }
+      if (!equipForm.name.trim()) {
+        alert('Nama mesin target wajib diisi.');
+        setActing(false);
+        return;
+      }
+      let error: { message: string; code?: string } | null = null;
       if (editing.id) {
-        await supabase.from('equipment').update({ area_id: equipForm.area_id, name: equipForm.name, code: equipForm.code || null }).eq('id', editing.id);
+        ({ error } = await supabase.from('equipment').update({ area_id: equipForm.area_id, name: equipForm.name.trim(), code: equipForm.code.trim() || null, equipment_types: equipForm.equipment_types }).eq('id', editing.id));
       } else {
-        await supabase.from('equipment').insert({ area_id: equipForm.area_id, name: equipForm.name, code: equipForm.code || null });
+        ({ error } = await supabase.from('equipment').insert({ area_id: equipForm.area_id, name: equipForm.name.trim(), code: equipForm.code.trim() || null, equipment_types: equipForm.equipment_types }));
+      }
+      if (error) {
+        const message = error.code === '23505'
+          ? 'Nama mesin tersebut sudah terdaftar pada area yang dipilih.'
+          : error.message;
+        alert(`Gagal menyimpan mesin target: ${message}`);
+        setActing(false);
+        return;
       }
     } else if (editing.type === 'users') {
-      const departmentIds = ['spv', 'ss'].includes(userForm.role)
+      const departmentIds = ['spv', 'ss', 'teknisi'].includes(userForm.role)
         ? [...new Set(userForm.department_ids)]
         : (userForm.department_id ? [userForm.department_id] : []);
       const primaryDepartmentId = departmentIds[0] ?? null;
@@ -423,6 +542,50 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
     }
   }
 
+  async function saveWoLastNumber() {
+    if (!canEditGrStart) {
+      alert('Hanya admin/SS yang dapat mengatur penomoran WO.');
+      return;
+    }
+    if (!Number.isInteger(woLastNoForm) || woLastNoForm < 0 || woLastNoForm > 2147483647) {
+      alert('Nomor terakhir WO harus berupa bilangan bulat dari 0 ke atas.');
+      return;
+    }
+    setActing(true);
+    try {
+      const { error } = await supabase.rpc('set_wo_last_number', { p_last_no: woLastNoForm });
+      if (error) {
+        alert(`Gagal menyimpan penomoran WO: ${error.message}`);
+        return;
+      }
+      alert('Nomor terakhir WO berhasil disimpan.');
+      await loadAll();
+    } finally {
+      setActing(false);
+    }
+  }
+
+  async function setDepartmentPMEnabled(departmentId: string, enabled: boolean) {
+    if (profile?.role !== 'admin') {
+      alert('Hanya Admin yang dapat mengubah aktivasi PM departemen.');
+      return;
+    }
+    setActing(true);
+    try {
+      const { error } = await supabase.rpc('pm_set_department_enabled', {
+        p_department_id: departmentId,
+        p_pm_enabled: enabled,
+      });
+      if (error) {
+        alert(`Gagal mengubah aktivasi PM: ${error.message}`);
+        return;
+      }
+      await loadAll();
+    } finally {
+      setActing(false);
+    }
+  }
+
   if (loading) return <Spinner />;
 
   const tabs: { key: Tab; label: string; icon: typeof Building2 }[] = [
@@ -430,6 +593,8 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
     { key: 'areas', label: 'Areas', icon: MapPin },
     { key: 'equipment', label: 'Mesin Target', icon: Cpu },
     { key: 'users', label: 'Users', icon: Users },
+    { key: 'pm_settings', label: 'Aktivasi PM', icon: CalendarDays },
+    { key: 'wo_numbers', label: 'WO Numbering', icon: Hash },
     { key: 'categories', label: 'Categories', icon: Tag },
     { key: 'units', label: 'Units', icon: Ruler },
     { key: 'locations', label: 'Locations', icon: Warehouse },
@@ -438,8 +603,15 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
     { key: 'groups', label: 'Inventory Groups', icon: FolderTree },
   ];
   const visibleTabs = scope === 'wo'
-    ? (profile?.role === 'ss' ? WO_TABS.filter((t) => t !== 'users') : WO_TABS)
+    ? (profile?.role === 'admin' || profile?.role === 'ss'
+      ? (profile.role === 'admin' ? WO_TABS : WO_TABS.filter((key) => key !== 'pm_settings'))
+      : profile?.role === 'spv'
+        ? (['areas', 'equipment'] as Tab[])
+        : [])
     : INVENTORY_TABS;
+  const currentWoSortTab: WoSortTab | null = scope === 'wo' && ['departments', 'areas', 'equipment', 'users'].includes(tab)
+    ? tab as WoSortTab
+    : null;
 
   return (
     <div className="space-y-4">
@@ -464,18 +636,43 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
 
       {/* Content */}
       <Card className="p-5">
-        <div className="flex items-center justify-between mb-4">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
           <h3 className="font-semibold text-slate-900">{tabs.find((t) => t.key === tab)?.label}</h3>
-          {tab !== 'gr_numbers' && (
-            <Button size="sm" onClick={() => openCreate(tab)}>
-              <Plus className="w-4 h-4" /> Add
-            </Button>
-          )}
+          <div className="flex flex-wrap items-center gap-2">
+            {tab === 'equipment' && (
+              <Select
+                aria-label="Filter area mesin target"
+                value={equipmentAreaFilter}
+                onChange={(event) => { setEquipmentAreaFilter(event.target.value); setEquipmentPage(1); }}
+                className="w-36 sm:w-48"
+              >
+                <option value="">Semua area</option>
+                {areas.map((area) => <option key={area.id} value={area.id}>{area.name}</option>)}
+              </Select>
+            )}
+            {currentWoSortTab && (
+              <Select
+                aria-label="Urutkan data master WO"
+                value={woSort[currentWoSortTab]}
+                onChange={(event) => setWoSort((current) => ({ ...current, [currentWoSortTab]: event.target.value }))}
+                className="w-36 sm:w-40"
+              >
+                {WO_SORT_OPTIONS[currentWoSortTab].map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </Select>
+            )}
+            {tab !== 'gr_numbers' && tab !== 'wo_numbers' && tab !== 'pm_settings' && (
+              <Button size="sm" onClick={() => openCreate(tab)}>
+                <Plus className="w-4 h-4" /> Add
+              </Button>
+            )}
+          </div>
         </div>
 
         {tab === 'departments' && (
           <div className="space-y-2">
-            {departments.map((d) => (
+            {sortedDepartments.map((d) => (
               <div key={d.id} className="flex items-center justify-between p-3 rounded-lg bg-slate-50">
                 <div>
                   <p className="text-sm font-medium text-slate-900">{d.name}</p>
@@ -495,9 +692,23 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
           </div>
         )}
 
+        {tab === 'pm_settings' && profile?.role === 'admin' && (
+          <div className="space-y-3">
+            <p className="text-sm text-slate-500">Aktivasi Preventive Maintenance dikelola Admin. Cakupan mesin per departemen diatur pada halaman Preventive Maintenance.</p>
+            {departments.map((department) => {
+              const enabled = departmentPMSettings[department.id] ?? false;
+              return <div key={department.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 p-3">
+                <div><p className="font-medium text-slate-800">{department.name}</p><p className="text-xs text-slate-500">{department.code} · {enabled ? 'PM aktif' : 'PM nonaktif'}</p></div>
+                <Button size="sm" variant={enabled ? 'secondary' : 'primary'} disabled={acting} onClick={() => void setDepartmentPMEnabled(department.id, !enabled)}>{enabled ? 'Nonaktifkan PM' : 'Aktifkan PM'}</Button>
+              </div>;
+            })}
+            {departments.length === 0 && <p className="py-5 text-center text-sm text-slate-400">Belum ada departemen.</p>}
+          </div>
+        )}
+
         {tab === 'areas' && (
           <div className="space-y-2">
-            {areas.map((a) => (
+            {sortedAreas.map((a) => (
               <div key={a.id} className="flex items-center justify-between p-3 rounded-lg bg-slate-50">
                 <p className="text-sm font-medium text-slate-900">{a.name}</p>
                 <div className="flex gap-1">
@@ -516,10 +727,18 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
 
         {tab === 'equipment' && (
           <div className="space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white p-3">
+              <EquipmentTypeCheckboxes
+                value={equipmentTypeFilter}
+                onChange={(types) => { setEquipmentTypeFilter(types); setEquipmentPage(1); }}
+                label="Filter kategori mesin"
+              />
+              <p className="text-xs text-slate-500">Menampilkan {visibleEquipment.length} dari {equipment.length} mesin</p>
+            </div>
             {pagedEquipment.map((eq) => (
               <div key={eq.id} className="flex items-center justify-between p-3 rounded-lg bg-slate-50">
                 <div>
-                  <p className="text-sm font-medium text-slate-900">{eq.name}</p>
+                  <div className="flex flex-wrap items-center gap-2"><p className="text-sm font-medium text-slate-900">{eq.name}</p><EquipmentTypeBadges types={eq.equipment_types} /></div>
                   <p className="text-xs text-slate-400">
                     {eq.code ? `${eq.code} · ` : ''}Lokasi/Area: {eq.area?.name ?? '-'}
                   </p>
@@ -534,11 +753,11 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
                 </div>
               </div>
             ))}
-            {equipment.length === 0 && <p className="text-sm text-slate-400 py-4 text-center">No equipment yet</p>}
-            {equipment.length > EQUIPMENT_PAGE_SIZE && (
+            {visibleEquipment.length === 0 && <p className="text-sm text-slate-400 py-4 text-center">Tidak ada mesin pada area ini.</p>}
+            {visibleEquipment.length > EQUIPMENT_PAGE_SIZE && (
               <div className="flex items-center justify-between gap-3 pt-2">
                 <p className="text-xs text-slate-500">
-                  Menampilkan {(equipmentPage - 1) * EQUIPMENT_PAGE_SIZE + 1}–{Math.min(equipmentPage * EQUIPMENT_PAGE_SIZE, equipment.length)} dari {equipment.length} mesin
+                  Menampilkan {(equipmentPage - 1) * EQUIPMENT_PAGE_SIZE + 1}–{Math.min(equipmentPage * EQUIPMENT_PAGE_SIZE, visibleEquipment.length)} dari {visibleEquipment.length} mesin
                 </p>
                 <div className="flex gap-2">
                   <Button variant="secondary" size="sm" disabled={equipmentPage <= 1} onClick={() => setEquipmentPage((page) => Math.max(1, page - 1))}>
@@ -555,7 +774,7 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
 
         {tab === 'users' && (
           <div className="space-y-2">
-            {users.map((u) => (
+            {sortedUsers.map((u) => (
               <div key={u.id} className="flex items-center justify-between p-3 rounded-lg bg-slate-50">
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2 flex-wrap">
@@ -569,9 +788,11 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
                     }>
                       {ROLE_LABELS[u.role]}
                     </Badge>
+                    {u.role === 'teknisi' && <Badge className="bg-slate-100 text-slate-500 border-slate-200">{u.work_schedule_type === 'shift' ? 'Shift (nonaktif)' : 'Non-shift'}</Badge>}
                     {!u.is_active && <Badge className="bg-gray-200 text-gray-500 border-gray-300">Inactive</Badge>}
                   </div>
                   <p className="text-xs text-slate-400 mt-0.5 truncate">{u.username ? `@${u.username}` : u.id}</p>
+                  {u.department_ids?.length ? <p className="mt-0.5 text-xs text-slate-500">Departemen: {u.department_ids.map((id) => departments.find((department) => department.id === id)?.name).filter(Boolean).join(', ')}</p> : null}
                 </div>
                 <div className="flex gap-1 flex-shrink-0">
                   <button onClick={() => openEdit('users', u.id, u)} className="p-2 text-slate-500 hover:bg-slate-200 rounded-lg">
@@ -704,6 +925,25 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
             </div>
           </div>
         )}
+        {tab === 'wo_numbers' && (
+          <div className="max-w-xl space-y-4">
+            <p className="text-sm text-slate-500">Atur nomor urut terakhir WO untuk tahun berjalan. Nomor WO berikutnya akan menggunakan urutan setelah angka ini. Sistem menjaga agar nomor yang sudah tersimpan tidak terlewati mundur.</p>
+            <div>
+              <Label>Nomor urut terakhir ({woNumberStatus.year})</Label>
+              <Input
+                type="number"
+                min={0}
+                max={2147483647}
+                value={woLastNoForm}
+                disabled={!canEditGrStart || acting}
+                onChange={(event) => setWoLastNoForm(Number(event.target.value || 0))}
+              />
+              <p className="mt-1 text-xs text-slate-500">WO terakhir tersimpan tahun ini: <span className="font-medium text-slate-700">{woNumberStatus.last_wo_number ?? 'Belum ada WO'}</span>. Nomor urut terakhir tercatat: <span className="font-medium text-slate-700">{woNumberStatus.last_no}</span>.</p>
+            </div>
+            {!canEditGrStart && <p className="text-xs text-slate-400">Hanya admin/SS yang dapat mengubah penomoran WO.</p>}
+            <div className="flex justify-end"><Button onClick={saveWoLastNumber} disabled={!canEditGrStart || acting}>{acting ? 'Menyimpan...' : 'Simpan WO Numbering'}</Button></div>
+          </div>
+        )}
       </Card>
 
       {/* Form Modal */}
@@ -804,6 +1044,12 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
                 <Label>Code</Label>
                 <Input value={equipForm.code} onChange={(e) => setEquipForm((f) => ({ ...f, code: e.target.value }))} placeholder="MTR-001" />
               </div>
+              <EquipmentTypeCheckboxes
+                mode="assign"
+                label="Kategori badge mesin (bisa pilih lebih dari satu)"
+                value={equipForm.equipment_types}
+                onChange={(equipment_types) => setEquipForm((f) => ({ ...f, equipment_types }))}
+              />
             </>
           )}
 
@@ -823,7 +1069,7 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
                   <Label>Role</Label>
                   <Select value={userForm.role} onChange={(e) => setUserForm((f) => {
                     const role = e.target.value as Role;
-                    const department_ids = ['spv', 'ss'].includes(role) && f.department_ids.length === 0 && f.department_id
+                    const department_ids = ['spv', 'ss', 'teknisi'].includes(role) && f.department_ids.length === 0 && f.department_id
                       ? [f.department_id]
                       : f.department_ids;
                     return { ...f, role, department_ids };
@@ -836,13 +1082,13 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
                   </Select>
                 </div>
                 <div>
-                  <Label>{['spv', 'ss'].includes(userForm.role) ? 'Departments' : 'Department'}</Label>
-                  {['spv', 'ss'].includes(userForm.role) ? (
+                  <Label>{['spv', 'ss', 'teknisi'].includes(userForm.role) ? 'Departments' : 'Department'}</Label>
+                  {['spv', 'ss', 'teknisi'].includes(userForm.role) ? (
                     <MultiPicker
                       options={departments.map((d) => ({ value: d.id, label: d.name, sublabel: d.code }))}
                       value={userForm.department_ids}
                       onChange={(department_ids) => setUserForm((f) => ({ ...f, department_ids, department_id: department_ids[0] ?? '' }))}
-                      placeholder="Cari dan pilih bagian..."
+                      placeholder="Cari dan pilih satu atau beberapa departemen..."
                     />
                   ) : (
                     <Select value={userForm.department_id} onChange={(e) => setUserForm((f) => ({ ...f, department_id: e.target.value, department_ids: e.target.value ? [e.target.value] : [] }))}>
@@ -852,6 +1098,9 @@ export default function AdminPanel({ scope }: { scope: MasterScope }) {
                   )}
                 </div>
               </div>
+              {profile?.role === 'admin' && userForm.role === 'teknisi' && editing.id && userForm.work_schedule_type === 'shift' && (
+                <p className="text-xs text-slate-500">Penanda Shift tersimpan (program shift sedang nonaktif).</p>
+              )}
               <div>
                 <Label>{editing.id ? 'Password baru (kosongkan jika tidak diganti)' : 'Password *'}</Label>
                 <Input type="password" value={userForm.password} onChange={(e) => setUserForm((f) => ({ ...f, password: e.target.value }))} placeholder="Min 6 karakter, huruf dan angka" autoComplete="new-password" />

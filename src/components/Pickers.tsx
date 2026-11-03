@@ -21,6 +21,7 @@ export type PickerOption = {
   right?: string; // teks di sisi kanan (mis. stok)
   search: string; // teks gabungan yang dicari
   disabled?: boolean;
+  badges?: { label: string; className: string }[];
 };
 
 export function SearchablePicker({
@@ -107,8 +108,11 @@ export function SearchablePicker({
           onClick={() => setOpen(true)}
           className="w-full flex items-center justify-between gap-2 px-4 py-2.5 border border-slate-300 rounded-lg text-sm bg-white text-left focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
         >
-          <span className={`truncate ${selected ? 'text-slate-900' : 'text-slate-400'}`}>
-            {selected ? selected.label : placeholder}
+          <span className="flex min-w-0 items-center gap-2">
+            <span className={`truncate ${selected ? 'text-slate-900' : 'text-slate-400'}`}>
+              {selected ? selected.label : placeholder}
+            </span>
+            {selected?.badges?.map((badge) => <span key={badge.label} className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${badge.className}`}>{badge.label}</span>)}
           </span>
           <span className="flex items-center gap-1 flex-shrink-0">
             {selected && (
@@ -162,6 +166,7 @@ export function SearchablePicker({
                   <span className="min-w-0">
                     <span className="block text-sm text-slate-900 truncate">{o.label}</span>
                     {o.sublabel && <span className="block text-xs text-slate-400 truncate">{o.sublabel}</span>}
+                    {o.badges?.length ? <span className="mt-1 flex flex-wrap gap-1">{o.badges.map((badge) => <span key={badge.label} className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${badge.className}`}>{badge.label}</span>)}</span> : null}
                   </span>
                   <span className="flex items-center gap-2 flex-shrink-0">
                     {o.right && (

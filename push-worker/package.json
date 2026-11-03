@@ -1,0 +1,8 @@
+{
+  "name": "engwo-push-worker",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "web-push": "3.6.7"
+  }
+}

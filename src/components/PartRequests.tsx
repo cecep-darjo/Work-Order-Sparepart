@@ -297,8 +297,17 @@ export function PartRequestsInbox() {
   useEffect(() => {
     load();
     // Permintaan baru dari teknisi muncul otomatis tanpa perlu reload halaman.
-    const timer = setInterval(() => load(true), 30000);
-    return () => clearInterval(timer);
+    const timer = setInterval(() => {
+      if (document.visibilityState === 'visible') load(true);
+    }, 60000);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') load(true);
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [load, profile?.role]);
 
   if (!profile) return null;

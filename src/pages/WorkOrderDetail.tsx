@@ -1,5 +1,5 @@
 import { uuid } from '@/lib/uuid';
-import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef, type ReactNode } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import {
   supabase,
@@ -24,16 +24,29 @@ import {
   type WOStatus,
 } from '@/lib/supabase';
 import { Card, Badge, Button, Select, Textarea, Label, Spinner, Modal, Input } from '@/components/ui';
-import { MultiPicker, SearchablePicker } from '@/components/Pickers';
+import { EquipmentTypeBadges } from '@/components/EquipmentTypeCheckboxes';
+import { MultiPicker, SearchablePicker, type PickerOption } from '@/components/Pickers';
 import { groupNameMap, partPickerOption } from '@/lib/partOptions';
 import { PartRequestCard } from '@/components/PartRequests';
 import { PR_SELECT, type PartRequest } from '@/lib/partRequests';
+import { JOB_STATUS_LABELS, type JobStatus } from '@/lib/jobAssignments';
 import { downloadWoCompletionReport } from '@/lib/woReportPdf';
 import { fetchWoHistory, fmtWoTime, woWorkTimes } from '@/lib/woHistory';
 import { ArrowLeft, UserCog, Play, Pause, CheckCircle2, RotateCcw, Lock, Unlock, Package, Plus, Trash2, Pencil, History as HistoryIcon, FileDown, ImagePlus, X, XCircle, Undo2 } from 'lucide-react';
 
 const WO_PHOTO_MAX_BYTES = 500 * 1024;
 const ALLOWED_WO_PHOTO_MIME = ['image/jpeg', 'image/png', 'image/webp'];
+
+type LinkableJob = {
+  id: string;
+  job_no: string;
+  title: string;
+  description: string | null;
+  status: JobStatus;
+  report_notes: string | null;
+  equipment_id: string | null;
+  equipment?: { area_id: string | null } | null;
+};
 
 function filterWoPhotoFiles(files: File[], existing: File[]): File[] {
   const next: File[] = [];
@@ -60,8 +73,15 @@ export default function WorkOrderDetail({
   onBack: () => void;
 }) {
   const { profile } = useAuth();
+  const isAdmin = profile?.role === 'admin';
+  const isSS = profile?.role === 'ss';
+
+  function ssHasDepartmentAccess(departmentId: string) {
+    return isSS && (profile?.profile_department_ids ?? []).includes(departmentId);
+  }
   const woGalleryInputRef = useRef<HTMLInputElement>(null);
   const woCameraInputRef = useRef<HTMLInputElement>(null);
+  const loadedWoIdRef = useRef<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [wo, setWo] = useState<WorkOrder | null>(null);
   const [history, setHistory] = useState<WorkOrderHistory[]>([]);
@@ -71,6 +91,9 @@ export default function WorkOrderDetail({
   const [spvList, setSpvList] = useState<Profile[]>([]);
   const [spareParts, setSpareParts] = useState<SparePart[]>([]);
   const [groups, setGroups] = useState<InventoryGroup[]>([]);
+  const [partDataLoaded, setPartDataLoaded] = useState(false);
+  const [loadingPartData, setLoadingPartData] = useState(false);
+  const [showPartRequestForm, setShowPartRequestForm] = useState(false);
   const [requests, setRequests] = useState<PartRequest[]>([]);
   const [draft, setDraft] = useState<{ spare_part_id: string; quantity: number; note: string }[]>([]);
   const [purpose, setPurpose] = useState('');
@@ -86,10 +109,12 @@ export default function WorkOrderDetail({
   const [interventionReason, setInterventionReason] = useState('');
   const [showIntervention, setShowIntervention] = useState(false);
   const [interventionStatus, setInterventionStatus] = useState<WOStatus>('new');
+  const [showVerifyDialog, setShowVerifyDialog] = useState(false);
+  const [verificationComment, setVerificationComment] = useState('');
   const [acting, setActing] = useState(false);
   const [woPhotoFiles, setWoPhotoFiles] = useState<File[]>([]);
 
-  // Edit / delete (admin)
+  // Work Order edit form (Admin and department-scoped SS)
   const [showEdit, setShowEdit] = useState(false);
   const [editForm, setEditForm] = useState({
     department_id: '',
@@ -99,7 +124,7 @@ export default function WorkOrderDetail({
     priority: 'standard' as WorkOrder['priority'],
     work_types: [] as string[],
     spv_id: '',
-    // Khusus admin: tanggal WO, isi hasil pekerjaan, dan alasan perubahan
+    // Tanggal, hasil pekerjaan, dan alasan perubahan
     date_created: '',
     analysis: '',
     action_taken: '',
@@ -114,53 +139,66 @@ export default function WorkOrderDetail({
   const [cancelReason, setCancelReason] = useState('');
   const [showReactivate, setShowReactivate] = useState(false);
   const [reactivateReason, setReactivateReason] = useState('');
+  const [showLinkJob, setShowLinkJob] = useState(false);
+  const [linkableJobs, setLinkableJobs] = useState<LinkableJob[]>([]);
+  const [selectedJobId, setSelectedJobId] = useState('');
+  const [loadingLinkableJobs, setLoadingLinkableJobs] = useState(false);
 
   const loadData = useCallback(async () => {
-    setLoading(true);
-
-    const { data: woData } = await supabase
-      .from('work_orders')
-      .select(WO_SELECT)
-      .eq('id', woId)
-      .maybeSingle();
+    const needsInitialLoad = loadedWoIdRef.current !== woId;
+    if (needsInitialLoad) {
+      setLoading(true);
+      setPartDataLoaded(false);
+      setShowPartRequestForm(false);
+      setDraft([]);
+      setSpareParts([]);
+      setGroups([]);
+    }
+    const supportingDataPromise = Promise.all([
+      fetchWoHistory(woId),
+      supabase.from('work_order_parts').select('*, spare_part:spare_parts(*)').eq('work_order_id', woId).order('created_at', { ascending: false }),
+      supabase.from('wo_part_requests').select(PR_SELECT).eq('work_order_id', woId).order('requested_at', { ascending: false }),
+      supabase.from('profiles').select('*, department_assignments:profile_departments(department_id)').in('role', ['teknisi', 'spv', 'ss']).eq('is_active', true).order('full_name'),
+    ]);
+    const woResult = await supabase.from('work_orders').select(WO_SELECT).eq('id', woId).maybeSingle();
+    const woData = woResult.data;
     setWo(woData as unknown as WorkOrder);
     setAnalysis(woData?.analysis ?? '');
     setPendingReason(woData?.pending_reason ?? '');
+    setAssignTechs(woData ? woTechnicians(woData as unknown as WorkOrder).map((t) => t.id) : []);
+    setAssignSpv(woData?.spv_id ?? '');
+    loadedWoIdRef.current = woId;
+    setLoading(false);
 
-    setHistory(await fetchWoHistory(woId));
-
-    const { data: partsData } = await supabase
-      .from('work_order_parts')
-      .select('*, spare_part:spare_parts(*)')
-      .eq('work_order_id', woId)
-      .order('created_at', { ascending: false });
-    setParts((partsData as unknown as WorkOrderPart[]) ?? []);
-
-    const { data: reqData } = await supabase
-      .from('wo_part_requests')
-      .select(PR_SELECT)
-      .eq('work_order_id', woId)
-      .order('requested_at', { ascending: false });
-    setRequests((reqData as unknown as PartRequest[]) ?? []);
-
-    const [{ data: techs }, { data: spvs }, allSp, { data: grp }] = await Promise.all([
-      supabase.from('profiles').select('*, department_assignments:profile_departments(department_id)').eq('role', 'teknisi').eq('is_active', true).order('full_name'),
-      supabase.from('profiles').select('*').in('role', ['spv', 'ss']).eq('is_active', true).order('full_name'),
-      fetchAllRows<SparePart>('spare_parts', '*', 'name'),
-      supabase.from('inventory_groups').select('*').order('name'),
-    ]);
-    setGroups((grp as InventoryGroup[]) ?? []);
-    setTechList(((techs ?? []) as unknown as (Profile & { department_assignments?: { department_id: string }[] })[]).map((tech) => ({
+    const [historyResult, partsResult, requestsResult, profilesResult] = await supportingDataPromise;
+    setHistory(historyResult);
+    setParts((partsResult.data as unknown as WorkOrderPart[]) ?? []);
+    setRequests((requestsResult.data as unknown as PartRequest[]) ?? []);
+    const activeProfiles = (profilesResult.data ?? []) as unknown as (Profile & { department_assignments?: { department_id: string }[] })[];
+    const techs = activeProfiles.filter((person) => person.role === 'teknisi' || person.role === 'spv');
+    const spvs = activeProfiles.filter((person) => person.role === 'spv' || person.role === 'ss');
+    setTechList(techs.map((tech) => ({
       ...tech,
       department_ids: [...new Set([...(tech.department_assignments ?? []).map((d) => d.department_id), ...(tech.department_id ? [tech.department_id] : [])])],
     })));
-    setSpvList((spvs as Profile[]) ?? []);
-    setSpareParts((allSp ?? []) as SparePart[]);
-    setAssignTechs(woTechnicians(woData as unknown as WorkOrder).map((t) => t.id));
-    setAssignSpv(woData?.spv_id ?? '');
-
-    setLoading(false);
+    setSpvList(spvs.map((spv) => ({
+      ...spv,
+      department_ids: [...new Set([...(spv.department_assignments ?? []).map((assignment) => assignment.department_id), ...(spv.department_id ? [spv.department_id] : [])])],
+    })));
   }, [woId]);
+
+  async function loadPartData() {
+    if (partDataLoaded || loadingPartData) return;
+    setLoadingPartData(true);
+    const [allParts, groupResult] = await Promise.all([
+      fetchAllRows<SparePart>('spare_parts', '*', 'name'),
+      supabase.from('inventory_groups').select('*').order('name'),
+    ]);
+    setSpareParts(allParts);
+    setGroups((groupResult.data as InventoryGroup[]) ?? []);
+    setPartDataLoaded(true);
+    setLoadingPartData(false);
+  }
 
   useEffect(() => {
     loadData();
@@ -214,6 +252,63 @@ export default function WorkOrderDetail({
     }
   }
 
+  async function openLinkJobDialog() {
+    setLoadingLinkableJobs(true);
+    setShowLinkJob(true);
+    setSelectedJobId('');
+    const [{ data: jobs, error: jobsError }, { data: linkedWos, error: linkedError }] = await Promise.all([
+      supabase.from('job_assignments')
+        .select('id,job_no,title,description,status,report_notes,equipment_id,equipment:equipment(area_id)')
+        .in('status', ['assigned', 'on_the_way', 'in_progress', 'done', 'approved'])
+        .order('created_at', { ascending: false })
+        .limit(1000),
+      supabase.from('work_orders').select('job_assignment_id').not('job_assignment_id', 'is', null),
+    ]);
+    setLoadingLinkableJobs(false);
+    if (jobsError || linkedError) {
+      alert('Gagal memuat Jobs Assignment: ' + (jobsError?.message ?? linkedError?.message));
+      return;
+    }
+    const linkedIds = new Set((linkedWos ?? []).map((row) => row.job_assignment_id as string));
+    setLinkableJobs(((jobs ?? []) as unknown as LinkableJob[]).filter((job) => !linkedIds.has(job.id)));
+  }
+
+  async function handleLinkJob() {
+    if (!wo || !profile || !selectedJobId || wo.job_assignment_id) return;
+    const job = linkableJobs.find((item) => item.id === selectedJobId);
+    if (!job) return;
+    if (!confirm(`Hubungkan ${job.job_no} ke WO ${wo.wo_number}? Data uraian, mesin, personel, foto, dan riwayat JA akan disinkronkan. Jika JA sudah disetujui, WO akan ditutup otomatis.`)) return;
+
+    setActing(true);
+    try {
+      const { data, error } = await supabase.from('work_orders')
+        .update({ job_assignment_id: job.id })
+        .eq('id', wo.id)
+        .is('job_assignment_id', null)
+        .select('status')
+        .maybeSingle();
+      if (error) throw error;
+      if (!data) throw new Error('WO sudah dihubungkan dengan JA lain atau Anda tidak memiliki akses. Muat ulang data dan coba lagi.');
+
+      const notes = `Jobs Assignment ${job.job_no} dihubungkan ke WO. Data JA disinkronkan.${job.status === 'approved' ? ' JA sudah disetujui; WO ditutup otomatis.' : ''}`;
+      await supabase.from('work_order_history').insert({
+        work_order_id: wo.id,
+        status: data.status,
+        action: 'Jobs Assignment linked to Work Order',
+        notes,
+        performed_by: profile.id,
+      });
+      await logActivity('link_job_assignment', `${wo.wo_number}: linked to ${job.job_no}`, notes);
+      setShowLinkJob(false);
+      await loadData();
+      alert(data.status === 'closed' ? 'JA berhasil dihubungkan dan WO ditutup.' : 'JA berhasil dihubungkan. Data JA akan ikut tersinkron, dan WO ditutup setelah JA disetujui.');
+    } catch (error) {
+      alert('Gagal menghubungkan JA: ' + (error instanceof Error ? error.message : String(error)));
+    } finally {
+      setActing(false);
+    }
+  }
+
   async function handleGenerateReport() {
     if (!profile) return;
     setActing(true);
@@ -256,8 +351,17 @@ export default function WorkOrderDetail({
   }
 
   async function handleVerifyAndGenerateReport() {
-    const ok = await updateStatus('verified', 'WO verified by SPV');
-    if (ok) await handleGenerateReport();
+    const ok = await updateStatus(
+      'verified',
+      'WO verified by SPV',
+      undefined,
+      verificationComment.trim() || undefined,
+    );
+    if (ok) {
+      setShowVerifyDialog(false);
+      setVerificationComment('');
+      await handleGenerateReport();
+    }
   }
 
   function handlePickWoPhotoFiles(files: FileList | null) {
@@ -352,7 +456,7 @@ export default function WorkOrderDetail({
   }
 
   async function handleAssign() {
-    if (!wo) return;
+    if (!wo || (isSS && !ssHasDepartmentAccess(wo.department_id))) return;
     const currentIds = woTechnicians(wo).map((t) => t.id);
     const techChanged =
       assignTechs.length !== currentIds.length || assignTechs.some((id) => !currentIds.includes(id));
@@ -454,9 +558,9 @@ export default function WorkOrderDetail({
   }
 
   async function handleIntervention() {
-    if (!wo || !interventionReason) return;
+    if (!wo || !interventionReason.trim() || wo.status === 'closed' || interventionStatus === wo.status || (!isAdmin && !ssHasDepartmentAccess(wo.department_id))) return;
     setActing(true);
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from('work_orders')
       .update({
         status: interventionStatus,
@@ -464,15 +568,23 @@ export default function WorkOrderDetail({
         ...(interventionStatus === 'closed' ? { closed_at: null } : {}),
         ...(interventionStatus !== 'closed' ? { closed_at: null } : {}),
       })
-      .eq('id', wo.id);
+      .eq('id', wo.id)
+      .eq('status', wo.status)
+      .select('id')
+      .maybeSingle();
 
-    if (!error) {
-      await logHistory(wo.id, interventionStatus, 'Admin intervention', interventionReason);
-      await logActivity('admin_intervention', `${wo.wo_number}: status changed to ${interventionStatus}`, interventionReason);
-      setShowIntervention(false);
-      setInterventionReason('');
-      await loadData();
+    if (error || !data) {
+      alert(error ? 'Gagal mengubah status WO: ' + error.message : 'Status WO sudah berubah. Muat ulang data sebelum melakukan intervensi.');
+      setActing(false);
+      return;
     }
+
+    const interventionBy = isAdmin ? 'Admin' : 'SS';
+    await logHistory(wo.id, interventionStatus, `${interventionBy} intervention`, interventionReason);
+    await logActivity(isAdmin ? 'admin_intervention' : 'ss_intervention', `${wo.wo_number}: status changed to ${interventionStatus}`, interventionReason);
+    setShowIntervention(false);
+    setInterventionReason('');
+    await loadData();
     setActing(false);
   }
 
@@ -488,7 +600,7 @@ export default function WorkOrderDetail({
   }
 
   async function openEdit() {
-    if (!wo) return;
+    if (!wo || (!isAdmin && !ssHasDepartmentAccess(wo.department_id))) return;
     setEditForm({
       department_id: wo.department_id,
       area_id: wo.area_id ?? '',
@@ -508,12 +620,14 @@ export default function WorkOrderDetail({
     setEquipList([]);
     setShowEdit(true);
     const { data: depts } = await supabase.from('departments').select('*').order('name');
-    setDeptList((depts as Department[]) ?? []);
+    const allDepartments = (depts as Department[]) ?? [];
+    setDeptList(isAdmin ? allDepartments : allDepartments.filter((department) => ssHasDepartmentAccess(department.id)));
     await loadEditAreas();
     if (wo.area_id) await loadEditEquipment(wo.area_id);
   }
 
   async function handleEditDepartment(deptId: string) {
+    if (!isAdmin && !ssHasDepartmentAccess(deptId)) return;
     // Area tidak terikat departemen, jadi area & equipment terpilih tidak direset.
     setEditForm((f) => ({ ...f, department_id: deptId }));
   }
@@ -526,17 +640,25 @@ export default function WorkOrderDetail({
 
   async function handleSaveEdit() {
     if (!wo || !profile) return;
+    if (!isAdmin && (!ssHasDepartmentAccess(wo.department_id) || !ssHasDepartmentAccess(editForm.department_id))) {
+      alert('Anda hanya dapat mengubah Work Order pada departemen yang ditetapkan di profil Anda.');
+      return;
+    }
+    if (isSS && editForm.spv_id && !spvList.some((spv) => spv.id === editForm.spv_id && spv.department_ids?.includes(editForm.department_id))) {
+      alert('SPV yang dipilih harus memiliki akses ke departemen Work Order.');
+      return;
+    }
     if (!editForm.department_id || !editForm.problem_description.trim()) {
       alert('Departemen dan deskripsi masalah wajib diisi.');
       return;
     }
-    const isRealAdmin = profile.role === 'admin';
-    const needReason = isRealAdmin && ['done', 'verified', 'closed'].includes(wo.status);
+    const canEditFullWorkOrder = isAdmin || isSS;
+    const needReason = canEditFullWorkOrder && ['done', 'verified', 'closed'].includes(wo.status);
     if (needReason && editForm.reason.trim().length < 3) {
       alert('Alasan perubahan wajib diisi untuk WO yang sudah selesai/diverifikasi/ditutup.');
       return;
     }
-    if (isRealAdmin && !editForm.date_created) {
+    if (canEditFullWorkOrder && !editForm.date_created) {
       alert('Tanggal WO wajib diisi.');
       return;
     }
@@ -552,7 +674,7 @@ export default function WorkOrderDetail({
       spv_id: editForm.spv_id || null,
       updated_at: new Date().toISOString(),
     };
-    if (isRealAdmin) {
+    if (canEditFullWorkOrder) {
       updateData.date_created = editForm.date_created;
       updateData.analysis = editForm.analysis.trim() || null;
       updateData.action_taken = editForm.action_taken.trim() || null;
@@ -589,7 +711,7 @@ export default function WorkOrderDetail({
     if (wtA !== wtB) changes.push('jenis pekerjaan');
     if (editForm.problem_description.trim() !== wo.problem_description) changes.push('problem description');
     if ((editForm.spv_id || null) !== wo.spv_id) changes.push('SPV');
-    if (isRealAdmin) {
+    if (canEditFullWorkOrder) {
       const n = (v: string | null | undefined) => (v ?? '').trim();
       if (editForm.date_created !== (wo.date_created ?? '').slice(0, 10)) changes.push(`date created ${(wo.date_created ?? '').slice(0, 10)} -> ${editForm.date_created}`);
       if (n(editForm.analysis) !== n(wo.analysis)) changes.push('analysis');
@@ -598,10 +720,11 @@ export default function WorkOrderDetail({
       if (wo.status === 'pending' && n(editForm.pending_reason) !== n(wo.pending_reason)) changes.push('pending reason');
     }
     const summary = changes.length ? `Changed: ${changes.join(', ')}` : 'No field changed';
-    const editReason = isRealAdmin ? editForm.reason.trim() : '';
+    const editReason = canEditFullWorkOrder ? editForm.reason.trim() : '';
 
-    await logHistory(wo.id, newStatus, 'WO edited by admin', editReason ? `${summary} | Alasan: ${editReason}` : summary);
-    await logActivity('edit_wo', `${wo.wo_number}: edited by admin (${summary})`, editReason || undefined);
+    const editorLabel = isAdmin ? 'admin' : 'SS';
+    await logHistory(wo.id, newStatus, `WO edited by ${editorLabel}`, editReason ? `${summary} | Alasan: ${editReason}` : summary);
+    await logActivity('edit_wo', `${wo.wo_number}: edited by ${editorLabel} (${summary})`, editReason || undefined);
     setShowEdit(false);
     await loadData();
     setActing(false);
@@ -644,12 +767,10 @@ export default function WorkOrderDetail({
   }
 
   async function handleReopen() {
-    if (!wo) return;
+    if (!wo || !isAdmin || wo.status !== 'closed') return;
     setActing(true);
-    const { error } = await supabase
-      .from('work_orders')
-      .update({ status: 'verified', closed_at: null, updated_at: new Date().toISOString() })
-      .eq('id', wo.id);
+    const { error } = await supabase.rpc('admin_reopen_work_order', { p_wo_id: wo.id });
+    if (error) alert('Gagal membuka kembali WO: ' + error.message);
     if (!error) {
       await logHistory(wo.id, 'verified', 'WO reopened by admin');
       await logActivity('reopen_wo', `${wo.wo_number}: reopened from CLOSED`);
@@ -661,12 +782,25 @@ export default function WorkOrderDetail({
   if (loading) return <Spinner />;
   if (!wo) return <div className="text-center text-slate-400 py-12">Work order not found</div>;
 
-  const isAdmin = profile?.role === 'admin' || profile?.role === 'ss';
-  const needEditReason = profile?.role === 'admin' && ['done', 'verified', 'closed'].includes(wo.status);
+  const canManageWorkOrder = isAdmin || ssHasDepartmentAccess(wo.department_id);
+  const linkJobOptions: PickerOption[] = linkableJobs.map((job) => ({
+    value: job.id,
+    label: `${job.job_no} · ${job.title}`,
+    sublabel: [job.description, job.report_notes ? `Laporan: ${job.report_notes}` : null].filter(Boolean).join(' · '),
+    right: JOB_STATUS_LABELS[job.status],
+    search: `${job.job_no} ${job.title} ${job.description ?? ''} ${job.report_notes ?? ''} ${job.status}`,
+  }));
+  const editSpvOptions = isAdmin
+    ? (wo.spv && !spvList.some((spv) => spv.id === wo.spv!.id) ? [wo.spv, ...spvList] : spvList)
+    : spvList.filter((spv) => spv.department_ids?.includes(editForm.department_id));
+  const needEditReason = (isAdmin || isSS) && ['done', 'verified', 'closed'].includes(wo.status);
   const isSPV = profile?.role === 'spv' && (profile?.department_ids?.includes(wo.department_id) || profile?.department_id === wo.department_id || wo.spv_id === profile?.id);
+  const canLinkJobAssignment = isAdmin || ssHasDepartmentAccess(wo.department_id) || Boolean(
+    profile?.role === 'spv' && (profile.department_ids?.includes(wo.department_id) || profile.department_id === wo.department_id || wo.spv_id === profile.id)
+  );
   const canGenerateReport = profile?.role === 'spv' || profile?.role === 'ss' || profile?.role === 'admin';
   const assignedTechs = woTechnicians(wo);
-  const isTech = profile?.role === 'teknisi' && assignedTechs.some((t) => t.id === profile.id);
+  const isTech = (profile?.role === 'teknisi' || profile?.role === 'spv') && assignedTechs.some((t) => t.id === profile.id);
   const canUploadWoPhoto = isTech || isSPV;
   const isCanceled = wo.status === 'canceled';
   // Teknisi yang sudah ditugaskan tetap muncul di pilihan walau nonaktif.
@@ -675,7 +809,7 @@ export default function WorkOrderDetail({
     : techList.filter((tech) => tech.department_id === wo.department_id || tech.department_ids?.includes(wo.department_id));
   const techOptions = (
     [...scopedTechList, ...assignedTechs.filter((a) => !scopedTechList.some((t) => t.id === a.id))]
-  ).map((t) => ({ value: t.id, label: t.full_name, sublabel: t.username ? `@${t.username}` : undefined }));
+  ).map((t) => ({ value: t.id, label: t.full_name, sublabel: [t.role === 'spv' ? 'SPV' : null, t.username ? `@${t.username}` : null].filter(Boolean).join(' · ') || undefined }));
   const groupName = (p: SparePart) => groups.find((g) => g.id === p.group_id)?.name ?? '';
   const groupNames = groupNameMap(groups);
   const partOptions = spareParts.map((p) => partPickerOption(p, groupNames, { forIssue: true }));
@@ -721,7 +855,7 @@ export default function WorkOrderDetail({
           <InfoRow label="Peminta" value={wo.requester_name || '-'} />
           <InfoRow label="Dept. Peminta" value={wo.requester_department || '-'} />
           <InfoRow label="Area" value={wo.area?.name ?? '-'} />
-          <InfoRow label="Equipment" value={wo.equipment?.name ?? '-'} />
+          <InfoRow label="Equipment" value={wo.equipment ? <span className="inline-flex flex-wrap items-center gap-1">{wo.equipment.name}<EquipmentTypeBadges types={wo.equipment.equipment_types} /></span> : '-'} />
           <InfoRow label="Jobs Assignment" value={wo.job_assignment ? `${wo.job_assignment.job_no} · ${wo.job_assignment.title}` : '-'} />
           <InfoRow label="Mulai Dikerjakan" value={fmtWoTime(workTimes.startedAt)} />
           <InfoRow label="Selesai" value={fmtWoTime(workTimes.finishedAt)} />
@@ -830,18 +964,18 @@ export default function WorkOrderDetail({
       )}
 
       {/* Assignment section: admin menunjuk SPV, SPV yang berwenang menugaskan teknisi */}
-      {(isAdmin || isSPV) && wo.status !== 'closed' && wo.status !== 'canceled' && (
+      {(canManageWorkOrder || isSPV) && wo.status !== 'closed' && wo.status !== 'canceled' && (
         <Card className="p-5">
           <h3 className="font-semibold text-slate-900 mb-3 flex items-center gap-2">
             <UserCog className="w-4 h-4" /> Assignment
           </h3>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {isAdmin && (
+            {canManageWorkOrder && (
               <div className="sm:col-span-2">
                 <Label>SPV (PIC Work Order)</Label>
                 <Select value={assignSpv} onChange={(e) => setAssignSpv(e.target.value)}>
                   <option value="">Select SPV...</option>
-                  {spvList.map((s) => (
+                  {(isAdmin ? spvList : spvList.filter((spv) => spv.department_ids?.includes(wo.department_id))).map((s) => (
                     <option key={s.id} value={s.id}>{s.full_name}</option>
                   ))}
                 </Select>
@@ -979,7 +1113,7 @@ export default function WorkOrderDetail({
                   <p className="text-sm font-medium text-slate-900">{p.spare_part?.name}</p>
                   <p className="text-xs text-slate-400">{p.spare_part?.code} • {p.quantity} {p.spare_part?.unit}</p>
                 </div>
-                {(isAdmin || isTech) && wo.status !== 'closed' && wo.status !== 'canceled' && (
+                {(canManageWorkOrder || isTech) && wo.status !== 'closed' && wo.status !== 'canceled' && (
                   <button
                     onClick={() => handleRemovePart(p.id, p.spare_part_id, p.quantity)}
                     disabled={acting}
@@ -1004,8 +1138,21 @@ export default function WorkOrderDetail({
           Alur: teknisi mengajukan → disetujui SPV/SS/admin → diproses pengeluaran oleh inventory/admin. Stok berkurang saat tahap proses inventory.
         </p>
 
-        {(isAdmin || isTech) && wo.status !== 'closed' && wo.status !== 'verified' && wo.status !== 'canceled' && (
+        {(canManageWorkOrder || isTech) && wo.status !== 'closed' && wo.status !== 'verified' && wo.status !== 'canceled' && (
+          !showPartRequestForm ? (
+            <Button variant="secondary" size="sm" onClick={() => {
+              setShowPartRequestForm(true);
+              void loadPartData();
+            }} disabled={loadingPartData}>
+              <Plus className="w-4 h-4" /> Buat Permintaan Spare Part
+            </Button>
+          ) : loadingPartData ? (
+            <Spinner />
+          ) : (
           <div className="rounded-lg border border-slate-200 p-4 mb-4 space-y-3">
+            <div className="flex justify-end">
+              <Button variant="ghost" size="sm" onClick={() => setShowPartRequestForm(false)}>Tutup Form</Button>
+            </div>
             <div className="flex flex-col sm:flex-row gap-2 items-end">
               <div className="flex-1 w-full">
                 <Label>Cari Spare Part</Label>
@@ -1090,6 +1237,7 @@ export default function WorkOrderDetail({
               </>
             )}
           </div>
+          )
         )}
 
         {requests.length === 0 ? (
@@ -1108,7 +1256,7 @@ export default function WorkOrderDetail({
         <Card className="p-5">
           <h3 className="font-semibold text-slate-900 mb-3">Verification</h3>
           <div className="flex gap-2 flex-wrap">
-            <Button variant="success" onClick={handleVerifyAndGenerateReport} disabled={acting}>
+            <Button variant="success" onClick={() => { setVerificationComment(''); setShowVerifyDialog(true); }} disabled={acting}>
               <CheckCircle2 className="w-4 h-4" /> Verify & Generate Report
             </Button>
             <Button variant="warning" onClick={() => updateStatus('on_progress', 'Sent back for rework', {}, 'SPV requested rework')} disabled={acting}>
@@ -1117,6 +1265,32 @@ export default function WorkOrderDetail({
           </div>
         </Card>
       )}
+
+      <Modal open={showVerifyDialog} onClose={() => setShowVerifyDialog(false)} title="Verifikasi Work Order">
+        <div className="space-y-4">
+          <p className="text-sm text-slate-600">
+            Tambahkan komentar jika diperlukan. Komentar bersifat opsional dan akan tersimpan pada riwayat WO.
+          </p>
+          <div>
+            <Label>Komentar verifikasi (opsional)</Label>
+            <Textarea
+              rows={3}
+              maxLength={1000}
+              value={verificationComment}
+              onChange={(event) => setVerificationComment(event.target.value)}
+              placeholder="Catatan hasil pemeriksaan atau tindak lanjut..."
+              disabled={acting}
+            />
+            <p className="mt-1 text-xs text-slate-400">Maksimal 1.000 karakter.</p>
+          </div>
+          <div className="flex justify-end gap-3">
+            <Button variant="secondary" onClick={() => setShowVerifyDialog(false)} disabled={acting}>Batal</Button>
+            <Button variant="success" onClick={() => void handleVerifyAndGenerateReport()} disabled={acting}>
+              <CheckCircle2 className="w-4 h-4" />{acting ? 'Memverifikasi...' : 'Verifikasi & Buat Report'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       {/* Report WO (SPV ke atas) */}
       {canGenerateReport && (wo.status === 'verified' || wo.status === 'closed') && (
@@ -1132,29 +1306,35 @@ export default function WorkOrderDetail({
       )}
 
       {/* Admin actions */}
-      {isAdmin && (
+      {canManageWorkOrder && (
         <Card className="p-5">
           <h3 className="font-semibold text-slate-900 mb-3 flex items-center gap-2">
-            <Lock className="w-4 h-4" /> Admin Controls
+            <Lock className="w-4 h-4" /> {isAdmin ? 'Admin Controls' : 'SS Controls'}
           </h3>
           <div className="flex flex-wrap gap-2">
             <Button variant="secondary" size="sm" onClick={openEdit} disabled={acting}>
               <Pencil className="w-4 h-4" /> Edit WO
             </Button>
-            <Button variant="secondary" size="sm" onClick={() => setShowIntervention(true)}>
-              Change Status (Intervention)
-            </Button>
-            {wo.status === 'closed' && (
+            {wo.status !== 'closed' && (
+              <Button variant="secondary" size="sm" onClick={() => {
+                setInterventionStatus(wo.status);
+                setInterventionReason('');
+                setShowIntervention(true);
+              }}>
+                Change Status (Intervention)
+              </Button>
+            )}
+            {isAdmin && wo.status === 'closed' && (
               <Button variant="warning" size="sm" onClick={handleReopen} disabled={acting}>
                 <Unlock className="w-4 h-4" /> Reopen WO
               </Button>
             )}
-            {wo.status === 'verified' && (
-              <Button variant="success" size="sm" onClick={() => updateStatus('closed', 'WO closed by admin')} disabled={acting}>
+            {canManageWorkOrder && wo.status === 'verified' && (
+              <Button variant="success" size="sm" onClick={() => updateStatus('closed', `WO closed by ${isAdmin ? 'admin' : 'SS'}`)} disabled={acting}>
                 <Lock className="w-4 h-4" /> Close WO
               </Button>
             )}
-            {wo.status === 'canceled' ? (
+            {isAdmin && (wo.status === 'canceled' ? (
               <Button variant="success" size="sm" onClick={() => setShowReactivate(true)} disabled={acting}>
                 <Undo2 className="w-4 h-4" /> Reactivate WO
               </Button>
@@ -1164,10 +1344,53 @@ export default function WorkOrderDetail({
                   <XCircle className="w-4 h-4" /> Cancel WO
                 </Button>
               )
-            )}
+            ))}
           </div>
         </Card>
       )}
+
+      {canLinkJobAssignment && !wo.job_assignment_id && wo.status !== 'closed' && wo.status !== 'canceled' && (
+        <Card className="p-5">
+          <h3 className="font-semibold text-slate-900 mb-2">Integrasi Jobs Assignment</h3>
+          <p className="text-sm text-slate-600 mb-3">Hubungkan JA yang sudah dibuat untuk menyinkronkan laporan dan bukti pekerjaan ke WO. WO otomatis ditutup setelah JA disetujui.</p>
+          <Button variant="secondary" size="sm" onClick={openLinkJobDialog} disabled={acting}>
+            <CheckCircle2 className="w-4 h-4" /> Hubungkan JA
+          </Button>
+        </Card>
+      )}
+      <Modal open={showLinkJob} onClose={() => setShowLinkJob(false)} title="Hubungkan Jobs Assignment" maxWidth="max-w-2xl">
+        <div className="space-y-4">
+          <p className="text-sm text-slate-600">
+            Pilih JA yang sudah dibuat dan belum terhubung ke WO lain. Informasi pekerjaan, mesin, personel, foto, dan riwayat akan disinkronkan dari JA. Jika JA sudah disetujui, WO akan ditutup otomatis; jika belum, WO ditutup setelah JA disetujui.
+          </p>
+          {loadingLinkableJobs ? <Spinner /> : (
+            <>
+              <SearchablePicker
+                inline
+                value={selectedJobId}
+                options={linkJobOptions}
+                placeholder="Cari dan pilih Jobs Assignment..."
+                searchPlaceholder="Cari nomor JA, judul, atau isi laporan..."
+                emptyText="Tidak ada JA aktif atau selesai yang belum terhubung."
+                onChange={setSelectedJobId}
+              />
+              {selectedJobId && (() => {
+                const selected = linkableJobs.find((job) => job.id === selectedJobId);
+                return selected ? (
+                  <div className="rounded-lg bg-slate-50 p-3 text-sm text-slate-700">
+                    <p><b>{selected.job_no}</b> · {JOB_STATUS_LABELS[selected.status]}</p>
+                    <p className="mt-1 whitespace-pre-wrap">{[selected.title, selected.description, selected.report_notes].filter(Boolean).join('\n')}</p>
+                  </div>
+                ) : null;
+              })()}
+              <div className="flex justify-end gap-2">
+                <Button variant="secondary" onClick={() => setShowLinkJob(false)} disabled={acting}>Batal</Button>
+                <Button variant="primary" onClick={handleLinkJob} disabled={acting || !selectedJobId}>Hubungkan dan Sinkronkan</Button>
+              </div>
+            </>
+          )}
+        </div>
+      </Modal>
 
       {/* History */}
       <Card className="p-5">
@@ -1265,7 +1488,7 @@ export default function WorkOrderDetail({
               <Label>SPV</Label>
               <Select value={editForm.spv_id} onChange={(e) => setEditForm((f) => ({ ...f, spv_id: e.target.value }))}>
                 <option value="">None</option>
-                {(wo.spv && !spvList.some((x) => x.id === wo.spv!.id) ? [wo.spv, ...spvList] : spvList).map((x) => (
+                {editSpvOptions.map((x) => (
                   <option key={x.id} value={x.id}>{x.full_name}</option>
                 ))}
               </Select>
@@ -1282,42 +1505,40 @@ export default function WorkOrderDetail({
               onChange={(e) => setEditForm((f) => ({ ...f, problem_description: e.target.value }))}
             />
           </div>
-          {profile?.role === 'admin' && (
-            <div className="rounded-lg border border-slate-200 p-3 space-y-3">
-              <p className="text-sm font-semibold text-slate-800">Tanggal &amp; hasil pekerjaan (khusus admin)</p>
-              <div className="sm:w-56">
-                <Label>Tanggal WO</Label>
-                <Input type="date" value={editForm.date_created} onChange={(e) => setEditForm((f) => ({ ...f, date_created: e.target.value }))} />
-              </div>
-              <div>
-                <Label>Analysis</Label>
-                <Textarea rows={2} value={editForm.analysis} onChange={(e) => setEditForm((f) => ({ ...f, analysis: e.target.value }))} />
-              </div>
-              <div>
-                <Label>Action Taken</Label>
-                <Textarea rows={2} value={editForm.action_taken} onChange={(e) => setEditForm((f) => ({ ...f, action_taken: e.target.value }))} />
-              </div>
-              <div>
-                <Label>Result</Label>
-                <Textarea rows={2} value={editForm.result} onChange={(e) => setEditForm((f) => ({ ...f, result: e.target.value }))} />
-              </div>
-              {wo.status === 'pending' && (
-                <div>
-                  <Label>Pending Reason</Label>
-                  <Textarea rows={2} value={editForm.pending_reason} onChange={(e) => setEditForm((f) => ({ ...f, pending_reason: e.target.value }))} />
-                </div>
-              )}
-              <div>
-                <Label>Alasan perubahan{needEditReason ? ' *' : ''}</Label>
-                <Textarea
-                  rows={2}
-                  value={editForm.reason}
-                  onChange={(e) => setEditForm((f) => ({ ...f, reason: e.target.value }))}
-                  placeholder={needEditReason ? 'Wajib untuk WO yang sudah selesai/diverifikasi/ditutup' : 'Opsional'}
-                />
-              </div>
+          <div className="rounded-lg border border-slate-200 p-3 space-y-3">
+            <p className="text-sm font-semibold text-slate-800">Informasi lengkap Work Order</p>
+            <div className="sm:w-56">
+              <Label>Tanggal WO</Label>
+              <Input type="date" value={editForm.date_created} onChange={(e) => setEditForm((f) => ({ ...f, date_created: e.target.value }))} />
             </div>
-          )}
+            <div>
+              <Label>Analysis</Label>
+              <Textarea rows={2} value={editForm.analysis} onChange={(e) => setEditForm((f) => ({ ...f, analysis: e.target.value }))} />
+            </div>
+            <div>
+              <Label>Action Taken</Label>
+              <Textarea rows={2} value={editForm.action_taken} onChange={(e) => setEditForm((f) => ({ ...f, action_taken: e.target.value }))} />
+            </div>
+            <div>
+              <Label>Result</Label>
+              <Textarea rows={2} value={editForm.result} onChange={(e) => setEditForm((f) => ({ ...f, result: e.target.value }))} />
+            </div>
+            {wo.status === 'pending' && (
+              <div>
+                <Label>Pending Reason</Label>
+                <Textarea rows={2} value={editForm.pending_reason} onChange={(e) => setEditForm((f) => ({ ...f, pending_reason: e.target.value }))} />
+              </div>
+            )}
+            <div>
+              <Label>Alasan perubahan{needEditReason ? ' *' : ''}</Label>
+              <Textarea
+                rows={2}
+                value={editForm.reason}
+                onChange={(e) => setEditForm((f) => ({ ...f, reason: e.target.value }))}
+                placeholder={needEditReason ? 'Wajib untuk WO yang sudah selesai/diverifikasi/ditutup' : 'Opsional'}
+              />
+            </div>
+          </div>
           <p className="text-xs text-slate-400">
             Nomor WO tidak berubah walau departemen diganti. Untuk mengubah status gunakan Change Status.
             Perubahan dicatat di History dan Activity Log.
@@ -1390,13 +1611,16 @@ export default function WorkOrderDetail({
       </Modal>
 
       {/* Intervention modal */}
-      <Modal open={showIntervention} onClose={() => setShowIntervention(false)} title="Admin Intervention">
+      <Modal open={showIntervention} onClose={() => setShowIntervention(false)} title={isAdmin ? 'Admin Intervention' : 'SS Intervention'}>
         <div className="space-y-4">
+          <p className="rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-700">
+            Status WO saat ini: <span className="font-semibold">{STATUS_LABELS[wo.status]}</span>
+          </p>
           <div>
             <Label>Change Status To</Label>
             <Select value={interventionStatus} onChange={(e) => setInterventionStatus(e.target.value as WOStatus)}>
               {(Object.keys(STATUS_LABELS) as WOStatus[]).map((s) => (
-                <option key={s} value={s}>{STATUS_LABELS[s]}</option>
+                <option key={s} value={s} disabled={s === wo.status}>{STATUS_LABELS[s]}{s === wo.status ? ' (status saat ini)' : ''}</option>
               ))}
             </Select>
           </div>
@@ -1411,7 +1635,7 @@ export default function WorkOrderDetail({
           </div>
           <div className="flex justify-end gap-3">
             <Button variant="secondary" onClick={() => setShowIntervention(false)}>Cancel</Button>
-            <Button variant="danger" onClick={handleIntervention} disabled={acting || !interventionReason}>
+            <Button variant="danger" onClick={handleIntervention} disabled={acting || !interventionReason.trim() || interventionStatus === wo.status || wo.status === 'closed'}>
               {acting ? 'Processing...' : 'Confirm Intervention'}
             </Button>
           </div>
@@ -1424,7 +1648,7 @@ export default function WorkOrderDetail({
   );
 }
 
-function InfoRow({ label, value }: { label: string; value: string }) {
+function InfoRow({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div>
       <p className="text-xs text-slate-400">{label}</p>

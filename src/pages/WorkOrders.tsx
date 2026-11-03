@@ -19,9 +19,11 @@ import {
 } from '@/lib/supabase';
 import { useDebouncedValue } from '@/lib/useDebouncedValue';
 import { matchesQuery, SearchablePicker, type PickerOption } from '@/components/Pickers';
+import { EquipmentTypeBadges, EquipmentTypeCheckboxes, equipmentTypeBadge } from '@/components/EquipmentTypeCheckboxes';
+import PageControls from '@/components/PageControls';
 import { JOB_STATUS_LABELS, type JobStatus } from '@/lib/jobAssignments';
 import { Card, Badge, Button, Input, Select, Label, Modal, Textarea, Spinner, EmptyState } from '@/components/ui';
-import { ArrowDown, ArrowUp, BellRing, ClipboardCheck, Plus, Search } from 'lucide-react';
+import { BellRing, ClipboardCheck, Pencil, Plus, Search, Trash2 } from 'lucide-react';
 import {
   WO_ACTION_META,
   fetchPartRequestCounts,
@@ -31,6 +33,7 @@ import {
 } from '@/lib/actionItems';
 
 type SortKey = 'created_at' | 'updated_at' | 'wo_number' | 'status' | 'priority' | 'department';
+type WoSummaryFilter = 'running' | 'pending' | 'done' | 'verified' | 'closed';
 type LinkableJob = {
   id: string;
   job_no: string;
@@ -43,17 +46,35 @@ type LinkableJob = {
   equipment?: { id: string; area_id: string | null } | null;
   assigned_technicians?: { technician_id: string; technician?: { full_name: string } | null }[];
 };
-const SORT_OPTIONS: { key: SortKey; label: string }[] = [
-  { key: 'created_at', label: 'Tanggal Dibuat' },
-  { key: 'updated_at', label: 'Terakhir Diperbarui' },
-  { key: 'wo_number', label: 'No. WO' },
-  { key: 'status', label: 'Status' },
-  { key: 'priority', label: 'Prioritas' },
-  { key: 'department', label: 'Departemen' },
-];
 // Urutan alur kerja WO (untuk sort Status) dan peringkat prioritas (urgent lebih dulu saat "naik").
 const STATUS_ORDER: WOStatus[] = ['new', 'assigned', 'analysis', 'on_progress', 'pending', 'done', 'verified', 'closed', 'canceled'];
 const PRIORITY_RANK: Record<string, number> = { urgent: 0, standard: 1 };
+const PAGE_SIZE = 10;
+
+function WorkOrderStatCard({
+  label,
+  value,
+  tone,
+  active,
+  onClick,
+}: {
+  label: string;
+  value: number;
+  tone: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`text-left bg-white rounded-xl border p-4 transition hover:shadow-sm ${active ? 'border-blue-400 ring-1 ring-blue-300' : 'border-slate-200'}`}
+    >
+      <p className="text-xs text-slate-500">{label}</p>
+      <p className={`text-2xl font-bold mt-1 ${tone}`}>{value}</p>
+    </button>
+  );
+}
 
 /**
  * Ambil SEMUA work order yang boleh dilihat user (RLS tetap berlaku), melewati batas ±1.000
@@ -107,6 +128,7 @@ export default function WorkOrders({
   const [departments, setDepartments] = useState<Department[]>([]);
   const [areas, setAreas] = useState<Area[]>([]);
   const [equipmentList, setEquipmentList] = useState<Equipment[]>([]);
+  const [equipmentTypeFilter, setEquipmentTypeFilter] = useState<string[]>([]);
   const [linkableJobs, setLinkableJobs] = useState<LinkableJob[]>([]);
   const [spvList, setSpvList] = useState<Profile[]>([]);
   const [userList, setUserList] = useState<Profile[]>([]); // pilihan username untuk peminta
@@ -125,8 +147,14 @@ export default function WorkOrders({
     requester_department: '',
   });
   const [creating, setCreating] = useState(false);
+  const [deletingWoId, setDeletingWoId] = useState<string | null>(null);
+  const [editingWoNumber, setEditingWoNumber] = useState<WorkOrder | null>(null);
+  const [woNumberDraft, setWoNumberDraft] = useState('');
+  const [woNumberReason, setWoNumberReason] = useState('');
+  const [savingWoNumber, setSavingWoNumber] = useState(false);
   const [onlyMine, setOnlyMine] = useState(false); // SPV: hanya WO dengan dirinya sebagai PIC
   const [onlyAction, setOnlyAction] = useState(false); // hanya WO yang menunggu aksi user
+  const [page, setPage] = useState(1);
   const [partReqs, setPartReqs] = useState<Record<string, WoPartRequestCounts>>({});
   // WO yang punya permintaan part berstatus 'pending' (menunggu approval); tampil untuk semua role.
   const [waitingPartWo, setWaitingPartWo] = useState<Set<string>>(new Set());
@@ -157,6 +185,68 @@ export default function WorkOrders({
   useEffect(() => {
     loadWorkOrders();
   }, [loadWorkOrders]);
+
+  async function deleteWorkOrder(wo: WorkOrder) {
+    if (profile?.role !== 'admin' || deletingWoId) return;
+    if (!window.confirm(`Hapus Work Order ${wo.wo_number} secara permanen? Pemakaian spare part akan dikembalikan ke stok.`)) return;
+    if (!window.confirm(`Konfirmasi kedua: hapus ${wo.wo_number} beserta riwayat dan detailnya? Tindakan ini tidak dapat dibatalkan.`)) return;
+
+    setDeletingWoId(wo.id);
+    try {
+      const { error } = await supabase.rpc('admin_delete_work_order', {
+        p_wo_id: wo.id,
+        p_reason: 'Disetujui Admin setelah dua kali konfirmasi.',
+      });
+      if (error) throw error;
+
+      const photoPaths = (wo.attachments ?? []).flatMap((url) => {
+        const marker = '/wo-photo-files/';
+        const offset = url.indexOf(marker);
+        if (offset < 0) return [];
+        try { return [decodeURIComponent(url.slice(offset + marker.length))]; } catch { return [url.slice(offset + marker.length)]; }
+      });
+      const { error: photoError } = photoPaths.length
+        ? await supabase.storage.from('wo-photo-files').remove(photoPaths)
+        : { error: null };
+      await loadWorkOrders();
+      alert(photoError
+        ? `Work Order ${wo.wo_number} telah dihapus, tetapi sebagian foto lampiran gagal dibersihkan.`
+        : `Work Order ${wo.wo_number} berhasil dihapus.`);
+    } catch (error) {
+      alert('Gagal menghapus Work Order: ' + (error instanceof Error ? error.message : String(error)));
+    } finally {
+      setDeletingWoId(null);
+    }
+  }
+
+  async function saveWoNumber() {
+    if (!editingWoNumber || profile?.role !== 'admin' || savingWoNumber) return;
+    const nextNumber = woNumberDraft.trim();
+    const reason = woNumberReason.trim();
+    if (!nextNumber || !reason) {
+      alert('Nomor WO baru dan alasan perubahan wajib diisi.');
+      return;
+    }
+    if (!window.confirm(`Ubah seluruh nomor WO ${editingWoNumber.wo_number} menjadi ${nextNumber}?`)) return;
+    setSavingWoNumber(true);
+    try {
+      const { error } = await supabase.rpc('admin_update_work_order_number', {
+        p_work_order_id: editingWoNumber.id,
+        p_new_wo_number: nextNumber,
+        p_reason: reason,
+      });
+      if (error) throw error;
+      setEditingWoNumber(null);
+      setWoNumberDraft('');
+      setWoNumberReason('');
+      await loadWorkOrders();
+      alert(`Nomor WO berhasil diubah menjadi ${nextNumber}.`);
+    } catch (error) {
+      alert('Gagal mengubah nomor WO: ' + (error instanceof Error ? error.message : String(error)));
+    } finally {
+      setSavingWoNumber(false);
+    }
+  }
 
   async function loadCreateData() {
     const [{ data: allDepts }, { data: spvs }, { data: users }, { data: areaRows }, { data: equipmentRows }, { data: jobs }, { data: linkedWos }] = await Promise.all([
@@ -365,10 +455,22 @@ export default function WorkOrders({
     return c;
   }, [baseFiltered]);
 
+  const summaryCounts = useMemo(() => ({
+    running: workOrders.filter((wo) => ['assigned', 'analysis', 'on_progress'].includes(wo.status)).length,
+    pending: workOrders.filter((wo) => wo.status === 'pending').length,
+    done: workOrders.filter((wo) => wo.status === 'done').length,
+    verified: workOrders.filter((wo) => wo.status === 'verified').length,
+    closed: workOrders.filter((wo) => wo.status === 'closed').length,
+  }), [workOrders]);
+
   // Urutan tampilan. Pada urutan bawaan (Tanggal Dibuat, terbaru dulu) WO yang butuh aksi user
   // tetap tampil paling atas; bila user memilih urutan lain, urutan mengikuti pilihan itu saja.
   const visibleWorkOrders = useMemo(() => {
-    const list = statusFilter === 'all' ? baseFiltered : baseFiltered.filter((w) => w.status === statusFilter);
+    const list = statusFilter === 'all'
+      ? baseFiltered
+      : statusFilter === 'running'
+        ? baseFiltered.filter((w) => ['assigned', 'analysis', 'on_progress'].includes(w.status))
+        : baseFiltered.filter((w) => w.status === statusFilter);
     const dir = sortDir === 'asc' ? 1 : -1;
     const pinActions = sortKey === 'created_at' && sortDir === 'desc';
     const time = (v: string | null | undefined) => (v ? new Date(v).getTime() : 0);
@@ -404,6 +506,20 @@ export default function WorkOrders({
     });
   }, [baseFiltered, statusFilter, sortKey, sortDir, actionsByWo]);
 
+  const totalPages = Math.max(1, Math.ceil(visibleWorkOrders.length / PAGE_SIZE));
+  const pagedWorkOrders = useMemo(
+    () => visibleWorkOrders.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
+    [visibleWorkOrders, page],
+  );
+
+  useEffect(() => {
+    setPage(1);
+  }, [search, statusFilter, priorityFilter, typeFilter, deptFilter, createdFrom, createdTo, sortKey, sortDir, onlyMine, onlyAction]);
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
+
   const hasFilter = Boolean(
     search || statusFilter !== 'all' || priorityFilter !== 'all' || typeFilter !== 'all' ||
       deptFilter !== 'all' || createdFrom || createdTo || onlyAction
@@ -422,15 +538,18 @@ export default function WorkOrders({
 
   const equipmentPickerOptions = useMemo<PickerOption[]>(() => equipmentList
     .filter((equipment) => !createForm.area_id || equipment.area_id === createForm.area_id)
+    .filter((equipment) => equipment.id === createForm.equipment_id || equipmentTypeFilter.length === 0 || (equipment.equipment_types ?? ['Lainnya']).some((type) => equipmentTypeFilter.includes(type)))
     .map((equipment) => {
       const areaName = areas.find((area) => area.id === equipment.area_id)?.name;
+      const equipmentTypes = equipment.equipment_types?.length ? equipment.equipment_types : ['Lainnya'];
       return {
         value: equipment.id,
         label: equipment.name,
         sublabel: [equipment.code, areaName].filter(Boolean).join(' • '),
-        search: [equipment.name, equipment.code, areaName].filter(Boolean).join(' '),
+        search: [equipment.name, equipment.code, areaName, ...equipmentTypes].filter(Boolean).join(' '),
+        badges: equipmentTypes.map(equipmentTypeBadge),
       };
-    }), [areas, createForm.area_id, equipmentList]);
+    }), [areas, createForm.area_id, equipmentList, equipmentTypeFilter]);
   const jobAssignmentPickerOptions = useMemo<PickerOption[]>(() => linkableJobs.map((job) => {
     const technicianNames = job.assigned_technicians?.map((member) => member.technician?.full_name).filter(Boolean).join(', ')
       || (job.technician_id ? 'Teknisi ditugaskan' : 'Menunggu teknisi');
@@ -460,6 +579,13 @@ export default function WorkOrders({
 
   return (
     <div className="space-y-4">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+        <WorkOrderStatCard label="Sedang berjalan" value={summaryCounts.running} tone="text-blue-600" active={statusFilter === 'running'} onClick={() => setStatusFilter('running')} />
+        <WorkOrderStatCard label="Pending" value={summaryCounts.pending} tone="text-orange-600" active={statusFilter === 'pending'} onClick={() => setStatusFilter('pending')} />
+        <WorkOrderStatCard label="Menunggu verifikasi" value={summaryCounts.done} tone="text-amber-600" active={statusFilter === 'done'} onClick={() => setStatusFilter('done')} />
+        <WorkOrderStatCard label="Terverifikasi" value={summaryCounts.verified} tone="text-emerald-600" active={statusFilter === 'verified'} onClick={() => setStatusFilter('verified')} />
+        <WorkOrderStatCard label="Ditutup" value={summaryCounts.closed} tone="text-slate-600" active={statusFilter === 'closed'} onClick={() => setStatusFilter('closed')} />
+      </div>
       {/* Filters */}
       <div className="flex flex-col sm:flex-row gap-3">
         <div className="relative flex-1">
@@ -477,11 +603,35 @@ export default function WorkOrders({
           className="sm:w-48"
         >
           <option value="all">All Status ({baseFiltered.length})</option>
+          <option value="running">Sedang berjalan ({baseFiltered.filter((wo) => ['assigned', 'analysis', 'on_progress'].includes(wo.status)).length})</option>
           {(Object.keys(STATUS_LABELS) as WOStatus[]).map((s) => (
             <option key={s} value={s}>
               {STATUS_LABELS[s]} ({statusCounts[s] ?? 0})
             </option>
           ))}
+        </Select>
+        <Select
+          value={`${sortKey}:${sortDir}`}
+          onChange={(e) => {
+            const [key, dir] = e.target.value.split(':');
+            setSortKey(key as SortKey);
+            setSortDir(dir as 'asc' | 'desc');
+          }}
+          className="sm:w-56"
+          aria-label="Urutkan Work Order"
+        >
+          <option value="created_at:desc">Default: dibuat terbaru</option>
+          <option value="created_at:asc">Tanggal dibuat · terlama</option>
+          <option value="updated_at:desc">Terakhir diperbarui · terbaru</option>
+          <option value="updated_at:asc">Terakhir diperbarui · terlama</option>
+          <option value="wo_number:asc">Nomor WO · A–Z</option>
+          <option value="wo_number:desc">Nomor WO · Z–A</option>
+          <option value="status:asc">Status · alur kerja</option>
+          <option value="status:desc">Status · alur kerja terbalik</option>
+          <option value="priority:asc">Prioritas · urgent dahulu</option>
+          <option value="priority:desc">Prioritas · standard dahulu</option>
+          <option value="department:asc">Departemen · A–Z</option>
+          <option value="department:desc">Departemen · Z–A</option>
         </Select>
         {profile?.role === 'spv' && (
           <Button variant={onlyMine ? 'primary' : 'secondary'} onClick={() => setOnlyMine((v) => !v)}>
@@ -507,7 +657,7 @@ export default function WorkOrders({
       </div>
 
       {/* Filter lanjutan & urutan */}
-      <div className="grid grid-cols-2 lg:grid-cols-6 gap-2 items-end">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-2 items-end">
         <div>
           <Label>Prioritas</Label>
           <Select value={priorityFilter} onChange={(e) => setPriorityFilter(e.target.value)}>
@@ -543,29 +693,10 @@ export default function WorkOrders({
           <Label>Dibuat sampai</Label>
           <Input type="date" value={createdTo} min={createdFrom || undefined} onChange={(e) => setCreatedTo(e.target.value)} />
         </div>
-        <div>
-          <Label>Urutkan</Label>
-          <div className="flex gap-1">
-            <Select value={sortKey} onChange={(e) => setSortKey(e.target.value as SortKey)} aria-label="Urutkan berdasarkan">
-              {SORT_OPTIONS.map((o) => (
-                <option key={o.key} value={o.key}>{o.label}</option>
-              ))}
-            </Select>
-            <button
-              type="button"
-              onClick={() => setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))}
-              className="px-3 border border-slate-300 rounded-lg bg-white text-slate-600 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
-              title={sortDir === 'asc' ? 'Naik (A-Z / terlama) — klik untuk membalik' : 'Turun (Z-A / terbaru) — klik untuk membalik'}
-              aria-label="Balik arah urutan"
-            >
-              {sortDir === 'asc' ? <ArrowUp className="w-4 h-4" /> : <ArrowDown className="w-4 h-4" />}
-            </button>
-          </div>
-        </div>
       </div>
 
       <div className="flex items-center justify-between gap-3 text-xs text-slate-500 flex-wrap">
-        <span>Menampilkan {visibleWorkOrders.length} dari {workOrders.length} WO</span>
+        <span>{visibleWorkOrders.length} WO sesuai filter dari {workOrders.length} WO</span>
         <span className="flex items-center gap-3">
           {hasFilter && (
             <button type="button" className="text-blue-600 hover:text-blue-700 font-medium" onClick={resetFilters}>
@@ -604,7 +735,7 @@ export default function WorkOrders({
         </Card>
       ) : (
         <div className={`grid gap-3 transition-opacity ${refreshing ? 'opacity-60' : ''}`}>
-          {visibleWorkOrders.map((wo) => {
+          {pagedWorkOrders.map((wo) => {
             const actions = actionsByWo.get(wo.id) ?? [];
             // WO yang sudah selesai/dibatalkan tidak lagi menunggu approval part.
             const waitingPart =
@@ -612,11 +743,11 @@ export default function WorkOrders({
             return (
             <Card
               key={wo.id}
-              className={`p-4 hover:shadow-md transition-shadow cursor-pointer ${
+              className={`relative p-4 hover:shadow-md transition-shadow cursor-pointer ${
                 actions.length > 0 ? 'border-l-4 border-l-amber-400 bg-amber-50/30' : ''
               }`}
             >
-              <button onClick={() => onSelectWO(wo.id)} className="w-full text-left">
+              <button onClick={() => onSelectWO(wo.id)} className={`w-full text-left ${profile?.role === 'admin' ? 'pr-11' : ''}`}>
                 <div className="flex items-start justify-between gap-3 mb-2">
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
@@ -674,7 +805,7 @@ export default function WorkOrders({
                 <div className="flex items-center gap-4 text-xs text-slate-400 flex-wrap">
                   {wo.department && <span>{wo.department.name}</span>}
                   {wo.area && <span>• {wo.area.name}</span>}
-                  {wo.equipment && <span>• {wo.equipment.name}</span>}
+                  {wo.equipment && <span className="inline-flex flex-wrap items-center gap-1">• {wo.equipment.name}<EquipmentTypeBadges types={wo.equipment.equipment_types} /></span>}
                   {wo.job_assignment && <span>• JA: {wo.job_assignment.job_no}</span>}
                   {wo.requester_name && <span>• Peminta: {wo.requester_name}</span>}
                   {profile?.role === 'spv' && (
@@ -688,11 +819,80 @@ export default function WorkOrders({
                   <span>• {new Date(wo.created_at).toLocaleDateString()}</span>
                 </div>
               </button>
+              {profile?.role === 'admin' && (
+                <div className="absolute top-3 right-3 flex items-center gap-1">
+                  <button
+                    type="button"
+                    title="Ubah nomor Work Order"
+                    aria-label={`Ubah nomor Work Order ${wo.wo_number}`}
+                    disabled={savingWoNumber || deletingWoId !== null}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setEditingWoNumber(wo);
+                      setWoNumberDraft(wo.wo_number);
+                      setWoNumberReason('');
+                    }}
+                    className="rounded-lg p-2 text-blue-600 hover:bg-blue-50 disabled:opacity-40"
+                  >
+                    <Pencil className="w-4 h-4" />
+                  </button>
+                  <button
+                    type="button"
+                    title="Hapus Work Order"
+                    aria-label={`Hapus Work Order ${wo.wo_number}`}
+                    disabled={deletingWoId !== null || savingWoNumber}
+                    onClick={(event) => { event.stopPropagation(); void deleteWorkOrder(wo); }}
+                    className="rounded-lg p-2 text-red-600 hover:bg-red-50 disabled:opacity-40"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
             </Card>
             );
           })}
+          <PageControls page={page} totalItems={visibleWorkOrders.length} onPageChange={setPage} />
         </div>
       )}
+
+      <Modal
+        open={editingWoNumber !== null}
+        onClose={() => { if (!savingWoNumber) setEditingWoNumber(null); }}
+        title="Ubah Nomor Work Order"
+      >
+        <div className="space-y-4">
+          <div>
+            <Label>Nomor saat ini</Label>
+            <Input value={editingWoNumber?.wo_number ?? ''} readOnly className="bg-slate-50" />
+          </div>
+          <div>
+            <Label>Nomor WO baru *</Label>
+            <Input
+              value={woNumberDraft}
+              onChange={(event) => setWoNumberDraft(event.target.value)}
+              maxLength={120}
+              placeholder="Masukkan seluruh kode nomor WO"
+              autoFocus
+            />
+            <p className="mt-1 text-xs text-slate-500">Seluruh kode dapat diubah, termasuk prefix, departemen, tahun, dan nomor urut. Nomor harus unik.</p>
+          </div>
+          <div>
+            <Label>Alasan perubahan *</Label>
+            <Textarea
+              rows={3}
+              value={woNumberReason}
+              onChange={(event) => setWoNumberReason(event.target.value)}
+              placeholder="Catat alasan koreksi nomor WO"
+            />
+          </div>
+          <div className="flex justify-end gap-3 pt-2">
+            <Button variant="secondary" onClick={() => setEditingWoNumber(null)} disabled={savingWoNumber}>Batal</Button>
+            <Button onClick={saveWoNumber} disabled={savingWoNumber || !woNumberDraft.trim() || !woNumberReason.trim()}>
+              {savingWoNumber ? 'Menyimpan...' : 'Simpan Nomor WO'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       {/* Create Modal */}
       <Modal open={showCreate} onClose={() => setShowCreate(false)} title="Create Work Order" maxWidth="max-w-2xl">
@@ -781,13 +981,16 @@ export default function WorkOrders({
             </div>
             <div>
               <Label>Mesin Target</Label>
+              <div className="mb-2">
+                <EquipmentTypeCheckboxes label="Filter kategori mesin" value={equipmentTypeFilter} onChange={setEquipmentTypeFilter} />
+              </div>
               <SearchablePicker
                 inline
                 value={createForm.equipment_id}
                 options={equipmentPickerOptions}
                 placeholder="Cari & pilih mesin target..."
                 searchPlaceholder="Cari nama, kode, atau area mesin..."
-                emptyText="Mesin target tidak ditemukan."
+                emptyText="Mesin target tidak ditemukan untuk filter ini."
                 disabled={equipmentPickerOptions.length === 0}
                 onChange={(equipmentId) => {
                   const selectedEquipment = equipmentList.find((equipment) => equipment.id === equipmentId);
@@ -799,7 +1002,7 @@ export default function WorkOrders({
                 }}
               />
               {equipmentPickerOptions.length === 0 && (
-                <p className="mt-1 text-xs text-slate-500">Belum ada mesin target untuk area ini.</p>
+                <p className="mt-1 text-xs text-slate-500">Belum ada mesin target yang cocok dengan area dan kategori terpilih.</p>
               )}
             </div>
           </div>

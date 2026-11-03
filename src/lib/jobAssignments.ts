@@ -5,10 +5,18 @@ import { uuid } from '@/lib/uuid';
 /* Tipe                                                                */
 /* ------------------------------------------------------------------ */
 
-export type JobStatus = 'assigned' | 'on_the_way' | 'in_progress' | 'done' | 'approved' | 'canceled';
+export type JobStatus = 'assigned' | 'on_the_way' | 'in_progress' | 'pending' | 'done' | 'approved' | 'canceled';
 export type JobPriority = 'low' | 'normal' | 'high' | 'urgent';
+export type JobCategory = 'perbaikan' | 'modifikasi' | 'tugas_lain' | 'preventive_maintenance';
 
-export type JobPerson = { id: string; full_name: string; username?: string | null };
+export const JOB_CATEGORY_LABELS: Record<JobCategory, string> = {
+  perbaikan: 'Perbaikan',
+  modifikasi: 'Modifikasi',
+  tugas_lain: 'Tugas Lain',
+  preventive_maintenance: 'Preventive Maintenance',
+};
+
+export type JobPerson = { id: string; full_name: string; username?: string | null; role?: string };
 export type AssignedTechnician = { technician_id: string; technician: JobPerson | null };
 
 export type JobPhoto = {
@@ -36,6 +44,7 @@ export type JobAssignment = {
   job_no: string;
   title: string;
   description: string | null;
+  work_category: JobCategory;
   location: string;
   equipment_id: string | null;
   manual_equipment: string | null;
@@ -43,6 +52,7 @@ export type JobAssignment = {
   deadline: string;
   priority: JobPriority;
   status: JobStatus;
+  pending_reason: string | null;
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -59,7 +69,7 @@ export type JobAssignment = {
   reviewer?: JobPerson | null;
   /** Pada daftar: hasil `photos:job_assignment_photos(count)`. */
   photos?: { count: number }[];
-  equipment?: { id: string; name: string; code: string | null; area?: { id: string; name: string } | null } | null;
+  equipment?: { id: string; name: string; code: string | null; equipment_types?: string[]; area?: { id: string; name: string } | null } | null;
 };
 
 /** Peran atasan: boleh membuat, memantau, dan meng-approve penugasan. */
@@ -73,10 +83,10 @@ export function isJobManager(role: Role | undefined | null): boolean {
 /* ------------------------------------------------------------------ */
 
 export const JOB_LIST_SELECT =
-  '*, technician:profiles!technician_id(id, full_name, username), assigned_technicians:job_assignment_technicians(technician_id, technician:profiles!technician_id(id, full_name, username)), creator:profiles!created_by(id, full_name), photos:job_assignment_photos(count), equipment:equipment(id, name, code, area:areas(id, name))';
+  'id,job_no,title,description,work_category,location,equipment_id,manual_equipment,technician_id,deadline,priority,status,pending_reason,created_by,created_at,updated_at,on_the_way_at,started_at,done_at,report_notes,reviewed_by,reviewed_at,review_note,technician:profiles!technician_id(id,full_name,username),assigned_technicians:job_assignment_technicians(technician_id,technician:profiles!technician_id(id,full_name,username)),creator:profiles!created_by(id,full_name),photos:job_assignment_photos(count),equipment:equipment(id,name,code,equipment_types,area:areas(id,name))';
 
 export const JOB_DETAIL_SELECT =
-  '*, technician:profiles!technician_id(id, full_name, username), assigned_technicians:job_assignment_technicians(technician_id, technician:profiles!technician_id(id, full_name, username)), creator:profiles!created_by(id, full_name), reviewer:profiles!reviewed_by(id, full_name), equipment:equipment(id, name, code, area:areas(id, name))';
+  '*, technician:profiles!technician_id(id, full_name, username), assigned_technicians:job_assignment_technicians(technician_id, technician:profiles!technician_id(id, full_name, username)), creator:profiles!created_by(id, full_name), reviewer:profiles!reviewed_by(id, full_name), equipment:equipment(id, name, code, equipment_types, area:areas(id, name))';
 
 /* ------------------------------------------------------------------ */
 /* Label & warna                                                       */
@@ -86,6 +96,7 @@ export const JOB_STATUS_LABELS: Record<JobStatus, string> = {
   assigned: 'Ditugaskan',
   on_the_way: 'On the Way',
   in_progress: 'In Progress',
+  pending: 'Pending',
   done: 'Done',
   approved: 'Disetujui',
   canceled: 'Dibatalkan',
@@ -95,6 +106,7 @@ export const JOB_STATUS_COLORS: Record<JobStatus, string> = {
   assigned: 'bg-slate-100 text-slate-700 border-slate-200',
   on_the_way: 'bg-sky-100 text-sky-700 border-sky-200',
   in_progress: 'bg-amber-100 text-amber-700 border-amber-200',
+  pending: 'bg-orange-100 text-orange-700 border-orange-200',
   done: 'bg-teal-100 text-teal-700 border-teal-200',
   approved: 'bg-emerald-100 text-emerald-700 border-emerald-200',
   canceled: 'bg-rose-100 text-rose-700 border-rose-200',
@@ -128,6 +140,11 @@ export const JOB_ACTIVE_STATUSES: JobStatus[] = ['assigned', 'on_the_way', 'in_p
 
 export function isJobActive(status: JobStatus): boolean {
   return JOB_ACTIVE_STATUSES.includes(status);
+}
+
+/** Tugas kerja yang belum dikirim untuk approval, termasuk yang ditunda atasan. */
+export function isJobOpen(status: JobStatus): boolean {
+  return status !== 'approved' && status !== 'canceled' && status !== 'done';
 }
 
 export function isJobFinal(status: JobStatus): boolean {

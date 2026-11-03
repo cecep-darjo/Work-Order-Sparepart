@@ -19,6 +19,7 @@ export default function UserSettings() {
   const [passwordMessage, setPasswordMessage] = useState<{ tone: 'success' | 'error'; text: string } | null>(null);
 
   if (!profile) return null;
+  const currentProfile = profile;
 
   async function saveFullName(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -31,7 +32,7 @@ export default function UserSettings() {
       setNameMessage({ tone: 'error', text: 'Nama lengkap maksimal 120 karakter.' });
       return;
     }
-    if (normalizedName === profile.full_name) {
+    if (normalizedName === currentProfile.full_name) {
       setNameMessage({ tone: 'success', text: 'Nama lengkap tidak berubah.' });
       return;
     }
@@ -42,7 +43,7 @@ export default function UserSettings() {
       const { data, error } = await supabase
         .from('profiles')
         .update({ full_name: normalizedName })
-        .eq('id', profile.id)
+        .eq('id', currentProfile.id)
         .select('id')
         .maybeSingle();
       if (error) throw error;

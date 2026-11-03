@@ -18,12 +18,12 @@ import EditTransactionModal from '@/components/EditTransactionModal';
 import { BON_SELECT, bonRemaining, type Bon, type BonItem } from '@/lib/bons';
 import { PR_SELECT, downloadIssueSlip, insufficientItems, type PartRequest } from '@/lib/partRequests';
 import { printIssueSlipByNo, printLegacyIssue } from '@/lib/manualIssue';
-import { Search, ArrowDownToLine, ArrowUpFromLine, PackageSearch, RefreshCw, FileDown, Plus, Trash2, Paperclip, ClipboardCheck, Pencil, ArrowUp, ArrowDown, ArrowUpDown } from 'lucide-react';
+import { Search, ArrowDownToLine, ArrowUpFromLine, PackageSearch, RefreshCw, FileDown, Plus, Trash2, Paperclip, ClipboardCheck, Pencil, ArrowUp, ArrowDown, ArrowUpDown, ChevronDown, ChevronUp } from 'lucide-react';
 
 type GRKind = 'credit' | 'cash' | 'import';
 
 /** Kunci sorting untuk daftar transaksi inventory. */
-type SortKey = 'created_at' | 'name' | 'kind' | 'type' | 'quantity' | 'balance_after' | 'gr_no' | 'notes';
+type SortKey = 'transaction_date' | 'name' | 'kind' | 'type' | 'quantity' | 'balance_after' | 'gr_no' | 'notes';
 
 /** Satu baris pada daftar pengeluaran. Baris dari bon membawa bon_item_id + batas sisa bon. */
 type IssueLine = {
@@ -73,6 +73,7 @@ type ServiceReceiptRow = {
   gr_attachments: string[] | null;
   created_by: string;
   created_at: string;
+  transaction_date?: string;
   item: {
     spare_part_name: string;
     uom: string | null;
@@ -129,7 +130,7 @@ export default function Transactions() {
   const [typeFilter, setTypeFilter] = useState('all');
   const [partFilter, setPartFilter] = useState('all');
   // Pengurutan kolom: default Tanggal terbaru dulu.
-  const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: 'created_at', dir: -1 });
+  const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: 'transaction_date', dir: -1 });
 
   function toggleSort(key: SortKey) {
     setSort((s) => (s.key === key ? { key, dir: s.dir === 1 ? -1 : 1 } : { key, dir: 1 }));
@@ -148,7 +149,7 @@ export default function Transactions() {
   const [issueAuto, setIssueAuto] = useState({ notes: '', reference: '' });
   const [issuePart, setIssuePart] = useState('');
   const [issueQty, setIssueQty] = useState(1);
-  const [issueForm, setIssueForm] = useState({ recipient: '', destination: '', reference: '', notes: '' });
+  const [issueForm, setIssueForm] = useState({ recipient: '', destination: '', reference: '', notes: '', transaction_date: new Date().toLocaleDateString('en-CA') });
   const [busyPdf, setBusyPdf] = useState<string | null>(null);
   const [stockCardPart, setStockCardPart] = useState<SparePart | null>(null);
   const [stockCard, setStockCard] = useState<InventoryTransaction[]>([]);
@@ -159,14 +160,15 @@ export default function Transactions() {
   const [notice, setNotice] = useState<string | null>(null);
   const [svcError, setSvcError] = useState<string | null>(null);
   const [shown, setShown] = useState(100); // render bertahap: 100 baris pertama dulu agar halaman ringan
-  const [editTxId, setEditTxId] = useState<string | null>(null); // admin: edit transaksi/dokumen
+  const [editTxId, setEditTxId] = useState<string | null>(null); // admin/inventory: edit transaksi/dokumen
   const [receiptLines, setReceiptLines] = useState<ReceiptLine[]>([]);
   const [receiptPart, setReceiptPart] = useState('');
   const [receiptQty, setReceiptQty] = useState(1);
-  const [receiptForm, setReceiptForm] = useState({ gr_kind: 'credit' as GRKind, source: '', reference: '', notes: '' });
+  const [receiptForm, setReceiptForm] = useState({ gr_kind: 'credit' as GRKind, source: '', reference: '', notes: '', transaction_date: new Date().toLocaleDateString('en-CA') });
   const [openPrs, setOpenPrs] = useState<RecallPR[]>([]);
   const [loadingPrs, setLoadingPrs] = useState(false);
   const [recallRequester, setRecallRequester] = useState('');
+  const [expandedRecallPr, setExpandedRecallPr] = useState<string | null>(null);
   // Daftar supplier dari database (untuk memilih sumber barang pemasukan).
   const [receiptSuppliers, setReceiptSuppliers] = useState<PickerOption[]>([]);
 
@@ -192,7 +194,7 @@ export default function Transactions() {
       supabase
         .from('purchase_requirement_service_receipts')
         .select(
-          'id, gr_no, gr_kind, received_qty, reference, notes, gr_attachments, created_by, created_at, item:purchase_requirement_items(spare_part_name, uom, pr:purchase_requirements(pr_no, supplier:inventory_suppliers(name)))'
+          'id, gr_no, gr_kind, received_qty, reference, notes, gr_attachments, created_by, created_at, transaction_date, item:purchase_requirement_items(spare_part_name, uom, pr:purchase_requirements(pr_no, supplier:inventory_suppliers(name)))'
         )
         .order('created_at', { ascending: false }),
     ]);
@@ -208,6 +210,7 @@ export default function Transactions() {
       work_order_id: null,
       created_by: r.created_by,
       created_at: r.created_at,
+      transaction_date: r.transaction_date ?? r.created_at.slice(0, 10),
       source: r.item?.pr?.supplier?.name ?? null,
       gr_no: r.gr_no,
       gr_kind: r.gr_kind,
@@ -251,7 +254,7 @@ export default function Transactions() {
     // Sort kolom.
     const get = (t: TxRow): string | number => {
       switch (sort.key) {
-        case 'created_at': return new Date(t.created_at).getTime();
+        case 'transaction_date': return t.transaction_date ?? t.created_at.slice(0, 10);
         case 'name': return (t.spare_part?.name ?? t.service_name ?? '').toLowerCase();
         case 'kind': return t.is_service_row ? 'Jasa' : 'Barang';
         case 'type': return t.is_service_row ? 'Jasa Selesai' : (TX_TYPE_LABELS[t.type] ?? t.type);
@@ -280,7 +283,7 @@ export default function Transactions() {
     setReceiptLines([]);
     setReceiptPart('');
     setReceiptQty(1);
-    setReceiptForm({ gr_kind: 'credit', source: '', reference: '', notes: '' });
+    setReceiptForm({ gr_kind: 'credit', source: '', reference: '', notes: '', transaction_date: new Date().toLocaleDateString('en-CA') });
     setPreviewGrNo(null);
     setGrFiles([]);
     setPreviewGrNo(null);
@@ -458,6 +461,7 @@ export default function Transactions() {
   }
 
   async function submitReceipt() {
+    if (!receiptForm.transaction_date) { alert('Tanggal pemasukan wajib diisi.'); return; }
     if (receiptLines.length === 0) { alert('Tambahkan minimal satu barang/jasa.'); return; }
     for (const l of receiptLines) {
       const name = l.description || 'barang';
@@ -489,6 +493,7 @@ export default function Transactions() {
         p_reference: reference || null,
         p_notes: receiptForm.notes.trim() || null,
         p_gr_attachments: uploaded.length > 0 ? uploaded : null,
+        p_transaction_date: receiptForm.transaction_date,
       });
       if (error) {
         alert('Pemasukan gagal: ' + error.message);
@@ -512,7 +517,7 @@ export default function Transactions() {
     setIssueItems([]);
     setIssuePart('');
     setIssueQty(1);
-    setIssueForm({ recipient: '', destination: '', reference: '', notes: '' });
+    setIssueForm({ recipient: '', destination: '', reference: '', notes: '', transaction_date: new Date().toLocaleDateString('en-CA') });
     setBonRequester('');
     setOpenBons([]);
     setOpenWoRequests([]);
@@ -658,6 +663,7 @@ export default function Transactions() {
   }
 
   async function submitIssue() {
+    if (!issueForm.transaction_date) { alert('Tanggal pengeluaran wajib diisi.'); return; }
     if (issueItems.length === 0) { alert('Tambahkan minimal satu barang.'); return; }
     if (!issueForm.recipient.trim()) { alert('Nama penerima wajib diisi.'); return; }
 
@@ -690,6 +696,7 @@ export default function Transactions() {
       p_destination: issueForm.destination.trim() || null,
       p_reference: reference || null,
       p_notes: notes || null,
+      p_transaction_date: issueForm.transaction_date,
     });
     if (error) {
       setActing(false);
@@ -785,59 +792,59 @@ export default function Transactions() {
 
       <Card className="overflow-hidden">
         {transactions.length === 0 ? <EmptyState message="Belum ada transaksi inventory." /> : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+          <div className="w-full overflow-hidden">
+            <table className="w-full table-fixed text-xs">
               <thead className="bg-slate-50 text-xs text-slate-500 uppercase">
                 <tr>
-                  <th className="text-left px-4 py-3">
+                  <th className="text-left px-2 py-3 w-[9%]">
                     <button type="button" onClick={() => toggleSort('gr_no')} className="inline-flex items-center gap-1 hover:text-slate-800">
                       No. GR <SortIcon active={sort.key === 'gr_no'} dir={sort.dir} />
                     </button>
                   </th>
-                  <th className="text-left px-4 py-3">
-                    <button type="button" onClick={() => toggleSort('created_at')} className="inline-flex items-center gap-1 hover:text-slate-800">
-                      Tanggal <SortIcon active={sort.key === 'created_at'} dir={sort.dir} />
+                  <th className="text-left px-2 py-3 w-[12%]">
+                    <button type="button" onClick={() => toggleSort('transaction_date')} className="inline-flex items-center gap-1 hover:text-slate-800">
+                      Tanggal <SortIcon active={sort.key === 'transaction_date'} dir={sort.dir} />
                     </button>
                   </th>
-                  <th className="text-left px-4 py-3 w-1/3 min-w-[14rem]">
+                  <th className="text-left px-2 py-3 w-[22%]">
                     <button type="button" onClick={() => toggleSort('name')} className="inline-flex items-center gap-1 hover:text-slate-800">
                       Spare Part <SortIcon active={sort.key === 'name'} dir={sort.dir} />
                     </button>
                   </th>
-                  <th className="text-left px-4 py-3">
+                  <th className="hidden 2xl:table-cell text-left px-2 py-3 w-[6%]">
                     <button type="button" onClick={() => toggleSort('kind')} className="inline-flex items-center gap-1 hover:text-slate-800">
                       Barang/Jasa <SortIcon active={sort.key === 'kind'} dir={sort.dir} />
                     </button>
                   </th>
-                  <th className="text-left px-4 py-3">
+                  <th className="text-left px-2 py-3 w-[11%]">
                     <button type="button" onClick={() => toggleSort('type')} className="inline-flex items-center gap-1 hover:text-slate-800">
                       Jenis <SortIcon active={sort.key === 'type'} dir={sort.dir} />
                     </button>
                   </th>
-                  <th className="text-right px-4 py-3">
+                  <th className="text-right px-2 py-3 w-[7%]">
                     <button type="button" onClick={() => toggleSort('quantity')} className="inline-flex items-center gap-1 hover:text-slate-800">
                       Qty <SortIcon active={sort.key === 'quantity'} dir={sort.dir} />
                     </button>
                   </th>
-                  <th className="text-right px-4 py-3">
+                  <th className="hidden xl:table-cell text-right px-2 py-3 w-[6%]">
                     <button type="button" onClick={() => toggleSort('balance_after')} className="inline-flex items-center gap-1 hover:text-slate-800">
                       Saldo <SortIcon active={sort.key === 'balance_after'} dir={sort.dir} />
                     </button>
                   </th>
-                  <th className="text-left px-4 py-3">Referensi</th>
-                  <th className="text-left px-4 py-3">
+                  <th className="hidden xl:table-cell text-left px-2 py-3 w-[8%]">Referensi</th>
+                  <th className="hidden lg:table-cell text-left px-2 py-3 w-[10%]">
                     <button type="button" onClick={() => toggleSort('notes')} className="inline-flex items-center gap-1 hover:text-slate-800">
                       Keterangan <SortIcon active={sort.key === 'notes'} dir={sort.dir} />
                     </button>
                   </th>
-                  <th className="text-right px-4 py-3">Dokumen</th>
+                  <th className="text-right px-2 py-3 w-[9%]">Dokumen</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {transactions.slice(0, shown).map((tx) => {
                   return (
                     <tr key={tx.id} className="hover:bg-slate-50">
-                      <td className="px-4 py-3 text-xs text-slate-500 whitespace-nowrap">
+                      <td className="px-2 py-3 text-[11px] text-slate-500">
                         {tx.gr_no ? (
                           <>
                             <div className="font-medium text-slate-700">{tx.gr_no}</div>
@@ -845,35 +852,35 @@ export default function Transactions() {
                           </>
                         ) : '-'}
                       </td>
-                      <td className="px-4 py-3 text-xs text-slate-500 whitespace-nowrap">{new Date(tx.created_at).toLocaleString('id-ID')}</td>
-                      <td className="px-4 py-3 w-1/3 min-w-[14rem]">
+                      <td className="px-2 py-3 text-[11px] text-slate-500 break-words">{new Date(`${tx.transaction_date ?? tx.created_at.slice(0, 10)}T00:00:00`).toLocaleDateString('id-ID')}</td>
+                      <td className="px-2 py-3 min-w-0">
                         {tx.is_service_row ? (
                           <>
-                            <b>{tx.service_name}</b>
+                            <b className="break-words">{tx.service_name}</b>
                             <span className="ml-1.5 inline-flex items-center rounded bg-violet-100 text-violet-700 px-1.5 py-0.5 text-[10px] font-semibold uppercase">Jasa</span>
                             <div className="text-xs text-slate-500">{tx.pr_no ? `PR ${tx.pr_no}` : 'Tanpa stok'}</div>
                           </>
                         ) : (
                           <>
-                            <b>{tx.spare_part?.name}</b>
-                            <div className="text-xs text-slate-500">{tx.spare_part?.code}</div>
+                            <b className="break-words">{tx.spare_part?.name}</b>
+                            <div className="text-[11px] text-slate-500 truncate" title={tx.spare_part?.code}>{tx.spare_part?.code}</div>
                           </>
                         )}
                       </td>
-                      <td className="px-4 py-3 text-xs text-slate-600 whitespace-nowrap">{tx.is_service_row ? 'Jasa' : 'Barang'}</td>
-                      <td className="px-4 py-3">
+                      <td className="hidden 2xl:table-cell px-2 py-3 text-[11px] text-slate-600">{tx.is_service_row ? 'Jasa' : 'Barang'}</td>
+                      <td className="px-2 py-3">
                         {tx.is_service_row ? (
                           <Badge className="bg-violet-100 text-violet-700 border-violet-200">Jasa Selesai</Badge>
                         ) : (
                           <Badge className={TX_TYPE_COLORS[tx.type]}>{TX_TYPE_LABELS[tx.type]}</Badge>
                         )}
                       </td>
-                      <td className="px-4 py-3 text-right font-medium">{tx.type === 'stock_out' ? '-' : tx.type === 'stock_in' ? '+' : ''}{tx.quantity} {tx.is_service_row ? (tx.service_unit ?? '') : tx.spare_part?.unit}</td>
-                      <td className="px-4 py-3 text-right text-slate-600">{tx.balance_after ?? '-'}</td>
-                      <td className="px-4 py-3 text-xs text-slate-500">{tx.reference ?? '-'}</td>
-                      <td className="px-4 py-3 text-xs text-slate-500 max-w-xs">{tx.notes ?? '-'}</td>
-                      <td className="px-4 py-3 text-right whitespace-nowrap">
-                        <div className="flex flex-col items-end gap-1">
+                      <td className="px-2 py-3 text-right font-medium break-words">{tx.type === 'stock_out' ? '-' : tx.type === 'stock_in' ? '+' : ''}{tx.quantity} {tx.is_service_row ? (tx.service_unit ?? '') : tx.spare_part?.unit}</td>
+                      <td className="hidden xl:table-cell px-2 py-3 text-right text-slate-600">{tx.balance_after ?? '-'}</td>
+                      <td className="hidden xl:table-cell px-2 py-3 text-[11px] text-slate-500 truncate" title={tx.reference ?? ''}>{tx.reference ?? '-'}</td>
+                      <td className="hidden lg:table-cell px-2 py-3 text-[11px] text-slate-500 truncate" title={tx.notes ?? ''}>{tx.notes ?? '-'}</td>
+                      <td className="px-2 py-3 text-right">
+                        <div className="flex flex-wrap justify-end gap-1">
                           {(tx.gr_attachments ?? []).map((url, idx) => (
                             <a
                               key={`${tx.id}-${idx}`}
@@ -885,7 +892,7 @@ export default function Transactions() {
                               <Paperclip className="w-3 h-3" /> Lampiran {idx + 1}
                             </a>
                           ))}
-                          {profile?.role === 'admin' && !tx.is_service_row && (
+                          {canTransact && !tx.is_service_row && (tx.type === 'stock_in' || tx.type === 'stock_out') && !tx.work_order_id && (
                             <Button size="sm" variant="secondary" onClick={() => setEditTxId(tx.id)}>
                               <Pencil className="w-4 h-4" /> Edit
                             </Button>
@@ -943,6 +950,11 @@ export default function Transactions() {
           <div className="p-3 rounded-lg bg-slate-50 text-sm text-slate-600">
             Diproses langsung oleh <b>Inventory Control/Admin</b>, tanpa approval. Semua barang dalam satu penerimaan memakai <b>satu nomor GR</b>.
             Barang bisa ditambah manual atau <b>dipanggil dari PR</b> berdasarkan peminta (pemesan).
+          </div>
+
+          <div>
+            <Label>Tanggal Pemasukan *</Label>
+            <Input type="date" value={receiptForm.transaction_date} onChange={(e) => setReceiptForm((f) => ({ ...f, transaction_date: e.target.value }))} />
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -1014,7 +1026,11 @@ export default function Transactions() {
                 </div>
                 {recallRequester && (
                   <div className="space-y-2">
-                    {recallPrs.map((pr) => (
+                    {recallPrs.map((pr) => {
+                      const remainingItems = pr.items.filter((i) => remaining(i) > 0);
+                      const isExpanded = expandedRecallPr === pr.id;
+                      const visibleItems = isExpanded ? remainingItems : remainingItems.slice(0, 1);
+                      return (
                       <div key={pr.id} className="rounded-lg bg-white border border-slate-200 p-3 space-y-2">
                         <div className="flex items-center justify-between gap-2 flex-wrap">
                           <div>
@@ -1026,7 +1042,7 @@ export default function Transactions() {
                           </Button>
                         </div>
                         <div className="divide-y divide-slate-100">
-                          {pr.items.filter((i) => remaining(i) > 0).map((it) => {
+                          {visibleItems.map((it) => {
                             const already = receiptLines.some((l) => l.pr_item_id === it.id);
                             const unit = it.is_service ? (it.uom ?? '') : '';
                             return (
@@ -1052,8 +1068,14 @@ export default function Transactions() {
                             );
                           })}
                         </div>
+                        {remainingItems.length > 1 && (
+                          <button type="button" className="inline-flex items-center gap-1 text-xs font-medium text-blue-700 hover:text-blue-900" onClick={() => setExpandedRecallPr(isExpanded ? null : pr.id)}>
+                            {isExpanded ? <><ChevronUp className="w-3.5 h-3.5" /> Sembunyikan item</> : <><ChevronDown className="w-3.5 h-3.5" /> Lihat {remainingItems.length - 1} item lainnya</>}
+                          </button>
+                        )}
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </>
@@ -1173,6 +1195,10 @@ export default function Transactions() {
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <Label>Tanggal Pengeluaran *</Label>
+              <Input type="date" value={issueForm.transaction_date} onChange={(e) => setIssueForm((f) => ({ ...f, transaction_date: e.target.value }))} />
+            </div>
             <div>
               <Label>Nama Penerima *</Label>
               <Input value={issueForm.recipient} onChange={(e) => setIssueForm((f) => ({ ...f, recipient: e.target.value }))} placeholder="Nama yang menerima barang" />
@@ -1372,7 +1398,7 @@ export default function Transactions() {
       </Modal>
 
       <Modal open={!!stockCardPart} onClose={() => setStockCardPart(null)} title={`Stock Card - ${stockCardPart?.code ?? ''}`} maxWidth="max-w-4xl">
-        {stockCardPart && <div className="space-y-3"><div className="text-sm text-slate-600">{stockCardPart.name} • Saldo sekarang <b>{stockCardPart.current_stock} {stockCardPart.unit}</b></div><div className="overflow-x-auto"><table className="w-full text-sm"><thead className="bg-slate-50 text-xs uppercase text-slate-500"><tr><th className="px-3 py-2 text-left">Tanggal</th><th className="px-3 py-2 text-left">No. Transaksi</th><th className="px-3 py-2 text-left">Jenis</th><th className="px-3 py-2 text-right">Masuk</th><th className="px-3 py-2 text-right">Keluar</th><th className="px-3 py-2 text-right">Saldo</th><th className="px-3 py-2 text-left">Ref</th></tr></thead><tbody className="divide-y">{stockCard.map((tx) => { const ext = tx as InventoryTransaction & { transaction_no?: string }; return <tr key={tx.id}><td className="px-3 py-2 text-xs">{new Date(tx.created_at).toLocaleString('id-ID')}</td><td className="px-3 py-2 text-xs font-medium">{ext.transaction_no ?? '-'}</td><td className="px-3 py-2"><Badge className={TX_TYPE_COLORS[tx.type]}>{TX_TYPE_LABELS[tx.type]}</Badge></td><td className="px-3 py-2 text-right">{tx.type === 'stock_in' ? tx.quantity : ''}</td><td className="px-3 py-2 text-right">{tx.type === 'stock_out' ? tx.quantity : ''}</td><td className="px-3 py-2 text-right font-medium">{tx.balance_after ?? '-'}</td><td className="px-3 py-2 text-xs">{tx.reference ?? '-'}</td></tr>; })}</tbody></table></div></div>}
+        {stockCardPart && <div className="space-y-3"><div className="text-sm text-slate-600">{stockCardPart.name} • Saldo sekarang <b>{stockCardPart.current_stock} {stockCardPart.unit}</b></div><div className="overflow-x-auto"><table className="w-full text-sm"><thead className="bg-slate-50 text-xs uppercase text-slate-500"><tr><th className="px-3 py-2 text-left">Tanggal</th><th className="px-3 py-2 text-left">No. Transaksi</th><th className="px-3 py-2 text-left">Jenis</th><th className="px-3 py-2 text-right">Masuk</th><th className="px-3 py-2 text-right">Keluar</th><th className="px-3 py-2 text-right">Saldo</th><th className="px-3 py-2 text-left">Ref</th></tr></thead><tbody className="divide-y">{stockCard.map((tx) => { const ext = tx as InventoryTransaction & { transaction_no?: string }; return <tr key={tx.id}><td className="px-3 py-2 text-xs">{new Date(`${tx.transaction_date ?? tx.created_at.slice(0, 10)}T00:00:00`).toLocaleDateString('id-ID')}</td><td className="px-3 py-2 text-xs font-medium">{ext.transaction_no ?? '-'}</td><td className="px-3 py-2"><Badge className={TX_TYPE_COLORS[tx.type]}>{TX_TYPE_LABELS[tx.type]}</Badge></td><td className="px-3 py-2 text-right">{tx.type === 'stock_in' ? tx.quantity : ''}</td><td className="px-3 py-2 text-right">{tx.type === 'stock_out' ? tx.quantity : ''}</td><td className="px-3 py-2 text-right font-medium">{tx.balance_after ?? '-'}</td><td className="px-3 py-2 text-xs">{tx.reference ?? '-'}</td></tr>; })}</tbody></table></div></div>}
       </Modal>
     </div>
   );

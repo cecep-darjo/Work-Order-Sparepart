@@ -66,7 +66,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         ...(assignments ?? []).map((row) => row.department_id as string),
         ...((data.department_id as string | null) ? [data.department_id as string] : []),
       ])];
-      setProfile({ ...(data as Profile), department_ids: departmentIds });
+      setProfile({
+        ...(data as Profile),
+        department_ids: departmentIds,
+        profile_department_ids: [...new Set((assignments ?? []).map((row) => row.department_id as string))],
+      });
     } else {
       setProfile(null);
     }
