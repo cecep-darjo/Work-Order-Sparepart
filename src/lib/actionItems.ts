@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { usePolling } from '@/lib/usePolling';
 import type { LucideIcon } from 'lucide-react';
 import { ClipboardCheck, Lock, ShieldCheck, UserPlus, Wrench } from 'lucide-react';
 import { supabase, type Profile, type SparePart, type WorkOrder } from '@/lib/supabase';
@@ -187,7 +188,7 @@ export async function fetchPartRequestCounts(profile: Profile): Promise<Record<s
 type Role = Profile['role'];
 
 // Keep the bell current while the app is being used, and let push handle background alerts.
-const POLL_MS = 60000;
+const POLL_MS = 120000;
 const STOCK_WATCHLIST_CACHE_MS = 120000;
 const LIMIT = 200;
 type LowStockPart = Pick<SparePart, 'id' | 'code' | 'name' | 'unit' | 'min_stock' | 'current_stock'>;
@@ -525,20 +526,14 @@ export function useActionItems(profile: Profile | null) {
   useEffect(() => {
     alive.current = true;
     reload();
-    // Permintaan/bon/WO baru muncul otomatis: polling berkala + saat tab kembali aktif.
-    const timer = setInterval(() => {
-      if (document.visibilityState === 'visible') void reload(true);
-    }, POLL_MS);
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') reload(true);
-    };
-    document.addEventListener('visibilitychange', onVisible);
     return () => {
       alive.current = false;
-      clearInterval(timer);
-      document.removeEventListener('visibilitychange', onVisible);
     };
   }, [reload]);
+
+  // Permintaan/bon/WO baru muncul otomatis: polling berkala hanya saat tab terlihat dan user aktif,
+  // plus satu pemuatan saat tab kembali aktif (lihat usePolling).
+  usePolling(() => { void reload(true); }, POLL_MS, { enabled: !!profile });
 
   const total = groups.reduce((n, g) => n + g.count, 0);
   return { groups, total, loading, reload };

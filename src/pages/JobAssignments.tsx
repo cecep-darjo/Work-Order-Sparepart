@@ -29,9 +29,10 @@ import {
   type JobPriority,
   type JobStatus,
 } from '@/lib/jobAssignments';
+import { usePolling } from '@/lib/usePolling';
 import { Camera, Clock, MapPin, Navigation, Play, Plus, RefreshCw, Search, User, Trash2 } from 'lucide-react';
 
-const POLL_MS = 60000;
+const POLL_MS = 120000;
 const PAGE_SIZE = 10;
 
 type StatusFilter = 'open' | 'running' | 'overdue' | 'all' | JobStatus;
@@ -277,23 +278,15 @@ export default function JobAssignments() {
 
   useEffect(() => {
     load();
-    const poll = setInterval(() => {
-      if (document.visibilityState === 'visible') load(true);
-    }, POLL_MS);
     const tick = setInterval(() => setNow(Date.now()), 60000);
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') {
-        load(true);
-        setNow(Date.now());
-      }
-    };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => {
-      clearInterval(poll);
-      clearInterval(tick);
-      document.removeEventListener('visibilitychange', onVisible);
-    };
+    return () => clearInterval(tick);
   }, [load]);
+
+  // Polling daftar tugas hanya saat tab terlihat dan user aktif (lihat usePolling).
+  usePolling(() => {
+    void load(true);
+    setNow(Date.now());
+  }, POLL_MS);
 
   // Daftar teknisi (hanya atasan yang membuat penugasan); Area dimuat di form.
   useEffect(() => {

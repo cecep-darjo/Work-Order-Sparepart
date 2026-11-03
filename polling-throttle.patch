@@ -1,0 +1,195 @@
+diff --git a/src/components/PartRequests.tsx b/src/components/PartRequests.tsx
+index 0e7f5dc..f77ad78 100644
+--- a/src/components/PartRequests.tsx
++++ b/src/components/PartRequests.tsx
+@@ -1,3 +1,4 @@
++import { usePolling } from '@/lib/usePolling';
+ import { useCallback, useEffect, useState } from 'react';
+ import { useAuth } from '@/context/AuthContext';
+ import { supabase, type Profile } from '@/lib/supabase';
+@@ -296,20 +297,11 @@ export function PartRequestsInbox() {
+ 
+   useEffect(() => {
+     load();
+-    // Permintaan baru dari teknisi muncul otomatis tanpa perlu reload halaman.
+-    const timer = setInterval(() => {
+-      if (document.visibilityState === 'visible') load(true);
+-    }, 60000);
+-    const onVisible = () => {
+-      if (document.visibilityState === 'visible') load(true);
+-    };
+-    document.addEventListener('visibilitychange', onVisible);
+-    return () => {
+-      clearInterval(timer);
+-      document.removeEventListener('visibilitychange', onVisible);
+-    };
+   }, [load, profile?.role]);
+ 
++  // Permintaan baru dari teknisi muncul otomatis tanpa perlu reload halaman.
++  usePolling(() => load(true), 120000);
++
+   if (!profile) return null;
+ 
+   async function pdf(id: string) {
+diff --git a/src/lib/actionItems.ts b/src/lib/actionItems.ts
+index 7a2a532..1b2bd01 100644
+--- a/src/lib/actionItems.ts
++++ b/src/lib/actionItems.ts
+@@ -1,4 +1,5 @@
+ import { useCallback, useEffect, useRef, useState } from 'react';
++import { usePolling } from '@/lib/usePolling';
+ import type { LucideIcon } from 'lucide-react';
+ import { ClipboardCheck, Lock, ShieldCheck, UserPlus, Wrench } from 'lucide-react';
+ import { supabase, type Profile, type SparePart, type WorkOrder } from '@/lib/supabase';
+@@ -187,7 +188,7 @@ export async function fetchPartRequestCounts(profile: Profile): Promise<Record<s
+ type Role = Profile['role'];
+ 
+ // Keep the bell current while the app is being used, and let push handle background alerts.
+-const POLL_MS = 60000;
++const POLL_MS = 120000;
+ const STOCK_WATCHLIST_CACHE_MS = 120000;
+ const LIMIT = 200;
+ type LowStockPart = Pick<SparePart, 'id' | 'code' | 'name' | 'unit' | 'min_stock' | 'current_stock'>;
+@@ -525,21 +526,15 @@ export function useActionItems(profile: Profile | null) {
+   useEffect(() => {
+     alive.current = true;
+     reload();
+-    // Permintaan/bon/WO baru muncul otomatis: polling berkala + saat tab kembali aktif.
+-    const timer = setInterval(() => {
+-      if (document.visibilityState === 'visible') void reload(true);
+-    }, POLL_MS);
+-    const onVisible = () => {
+-      if (document.visibilityState === 'visible') reload(true);
+-    };
+-    document.addEventListener('visibilitychange', onVisible);
+     return () => {
+       alive.current = false;
+-      clearInterval(timer);
+-      document.removeEventListener('visibilitychange', onVisible);
+     };
+   }, [reload]);
+ 
++  // Permintaan/bon/WO baru muncul otomatis: polling berkala hanya saat tab terlihat dan user aktif,
++  // plus satu pemuatan saat tab kembali aktif (lihat usePolling).
++  usePolling(() => { void reload(true); }, POLL_MS, { enabled: !!profile });
++
+   const total = groups.reduce((n, g) => n + g.count, 0);
+   return { groups, total, loading, reload };
+ }
+diff --git a/src/lib/usePolling.ts b/src/lib/usePolling.ts
+new file mode 100644
+index 0000000..6ffc745
+--- /dev/null
++++ b/src/lib/usePolling.ts
+@@ -0,0 +1,63 @@
++import { useEffect, useRef } from 'react';
++
++/**
++ * Polling hemat egress untuk data yang harus tetap "segar" tanpa realtime.
++ *
++ * Dibanding setInterval + visibilitychange yang tersebar di beberapa file, hook ini:
++ *  - hanya jalan saat tab terlihat DAN pengguna masih aktif (gerak mouse/klik/ketik/scroll/sentuh)
++ *    dalam `idleMs` terakhir — tab yang dibiarkan terbuka di monitor tak berpenghuni tidak
++ *    lagi menarik data seharian;
++ *  - saat tab kembali terlihat atau pengguna kembali aktif setelah idle, memuat ulang satu kali,
++ *    tapi tidak lebih sering dari `minGapMs` (berpindah-pindah tab tidak memicu query berulang);
++ *  - tidak memanggil callback saat mount: pemuatan awal tetap dilakukan pemanggil.
++ */
++const ACTIVITY_EVENTS = ['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart'] as const;
++
++export function usePolling(
++  callback: () => void,
++  intervalMs: number,
++  opts: { minGapMs?: number; idleMs?: number; enabled?: boolean } = {},
++) {
++  const { minGapMs = 30_000, idleMs = 30 * 60_000, enabled = true } = opts;
++  const callbackRef = useRef(callback);
++  useEffect(() => {
++    callbackRef.current = callback;
++  });
++
++  useEffect(() => {
++    if (!enabled) return;
++    let lastRun = Date.now();
++    let lastActive = Date.now();
++    let lastMark = 0;
++    const visible = () => document.visibilityState === 'visible';
++    const run = () => {
++      lastRun = Date.now();
++      callbackRef.current();
++    };
++
++    const timer = setInterval(() => {
++      if (!visible() || Date.now() - lastActive > idleMs) return;
++      run();
++    }, intervalMs);
++
++    const onVisible = () => {
++      if (visible() && Date.now() - lastRun >= minGapMs) run();
++    };
++    const onActivity = () => {
++      const now = Date.now();
++      const wasIdle = now - lastActive > idleMs;
++      if (!wasIdle && now - lastMark < 1_000) return; // pointermove bisa sangat sering
++      lastMark = now;
++      lastActive = now;
++      if (wasIdle && visible() && now - lastRun >= minGapMs) run();
++    };
++
++    document.addEventListener('visibilitychange', onVisible);
++    for (const name of ACTIVITY_EVENTS) window.addEventListener(name, onActivity, { passive: true });
++    return () => {
++      clearInterval(timer);
++      document.removeEventListener('visibilitychange', onVisible);
++      for (const name of ACTIVITY_EVENTS) window.removeEventListener(name, onActivity);
++    };
++  }, [intervalMs, minGapMs, idleMs, enabled]);
++}
+diff --git a/src/pages/JobAssignments.tsx b/src/pages/JobAssignments.tsx
+index f2157de..981df18 100644
+--- a/src/pages/JobAssignments.tsx
++++ b/src/pages/JobAssignments.tsx
+@@ -29,9 +29,10 @@ import {
+   type JobPriority,
+   type JobStatus,
+ } from '@/lib/jobAssignments';
++import { usePolling } from '@/lib/usePolling';
+ import { Camera, Clock, MapPin, Navigation, Play, Plus, RefreshCw, Search, User, Trash2 } from 'lucide-react';
+ 
+-const POLL_MS = 60000;
++const POLL_MS = 120000;
+ const PAGE_SIZE = 10;
+ 
+ type StatusFilter = 'open' | 'running' | 'overdue' | 'all' | JobStatus;
+@@ -277,24 +278,16 @@ export default function JobAssignments() {
+ 
+   useEffect(() => {
+     load();
+-    const poll = setInterval(() => {
+-      if (document.visibilityState === 'visible') load(true);
+-    }, POLL_MS);
+     const tick = setInterval(() => setNow(Date.now()), 60000);
+-    const onVisible = () => {
+-      if (document.visibilityState === 'visible') {
+-        load(true);
+-        setNow(Date.now());
+-      }
+-    };
+-    document.addEventListener('visibilitychange', onVisible);
+-    return () => {
+-      clearInterval(poll);
+-      clearInterval(tick);
+-      document.removeEventListener('visibilitychange', onVisible);
+-    };
++    return () => clearInterval(tick);
+   }, [load]);
+ 
++  // Polling daftar tugas hanya saat tab terlihat dan user aktif (lihat usePolling).
++  usePolling(() => {
++    void load(true);
++    setNow(Date.now());
++  }, POLL_MS);
++
+   // Daftar teknisi (hanya atasan yang membuat penugasan); Area dimuat di form.
+   useEffect(() => {
+     if (!isManager) return;

@@ -154,9 +154,16 @@ export default function Dashboard({
     setAnalyticsLoading(true);
     setAnalyticsError(null);
     try {
+      // Metrik hanya menghitung durasi sejak awal tahun ini (activeDuration(..., yearStart)), jadi WO/job
+      // yang sudah selesai SEBELUM awal tahun tidak perlu diunduh beserta seluruh riwayatnya.
+      const yearStart = jakartaPeriodStart('year');
+      const monthStart = jakartaPeriodStart('month');
+      const yearStartIso = new Date(yearStart).toISOString();
       const [woResult, jobResult, technicianResult] = await Promise.all([
-        supabase.from('work_orders').select('id,status,work_types,equipment_id,job_assignment_id,technician_id,created_at,closed_at,equipment:equipment(id,name),technicians:work_order_technicians(technician_id,technician:profiles!technician_id(id,full_name))'),
-        supabase.from('job_assignments').select('id,status,work_category,equipment_id,manual_equipment,technician_id,started_at,done_at,on_the_way_at,created_at,updated_at,technician:profiles!technician_id(id,full_name),assigned_technicians:job_assignment_technicians(technician_id,technician:profiles!technician_id(id,full_name)),equipment:equipment(id,name)'),
+        supabase.from('work_orders').select('id,status,work_types,equipment_id,job_assignment_id,technician_id,created_at,closed_at,equipment:equipment(id,name),technicians:work_order_technicians(technician_id,technician:profiles!technician_id(id,full_name))')
+          .or(`closed_at.is.null,closed_at.gte.${yearStartIso}`),
+        supabase.from('job_assignments').select('id,status,work_category,equipment_id,manual_equipment,technician_id,started_at,done_at,on_the_way_at,created_at,updated_at,technician:profiles!technician_id(id,full_name),assigned_technicians:job_assignment_technicians(technician_id,technician:profiles!technician_id(id,full_name)),equipment:equipment(id,name)')
+          .or(`done_at.is.null,done_at.gte.${yearStartIso}`),
         canViewTechnicianChart
           ? supabase.from('profiles').select('id,full_name').eq('role', 'teknisi').eq('is_active', true).order('full_name')
           : Promise.resolve({ data: [], error: null }),
@@ -183,8 +190,6 @@ export default function Dashboard({
         .filter((technician) => !busyTechnicianIds.has(technician.id)));
       const jobsById = new Map(jobs.map((job) => [job.id, job]));
       const linkedJobIds = new Set(workOrders.map((wo) => wo.job_assignment_id).filter((id): id is string => !!id));
-      const yearStart = jakartaPeriodStart('year');
-      const monthStart = jakartaPeriodStart('month');
       const historyByWo = new Map<string, WoHistoryRow[]>();
       if (workOrders.length) {
         const { data: histories, error } = await supabase.from('work_order_history')

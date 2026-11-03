@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Bell, CheckCircle2, ChevronRight, MessageCircle, Smartphone } from 'lucide-react';
 import { TONE_CLASSES, type ActionGroup } from '@/lib/actionItems';
 import { canUseBrowserNotifications, canUseWebPush, disableWebPush, enableWebPush, requestBrowserNotificationPermission, syncExistingWebPush } from '@/lib/browserNotifications';
-import { supabase } from '@/lib/supabase';
+import { useChatInbox } from '@/lib/chatHub';
 
 /**
  * Lonceng notifikasi: badge = jumlah item yang menunggu aksi user.
@@ -28,7 +28,7 @@ export default function NotificationBell({
     typeof Notification === 'undefined' ? 'default' : Notification.permission,
   );
   const [permissionError, setPermissionError] = useState<string | null>(null);
-  const [unreadChats, setUnreadChats] = useState(0);
+  const { unreadTotal: unreadChats } = useChatInbox(profileId);
   const ref = useRef<HTMLDivElement>(null);
   const notificationTotal = total + unreadChats;
 
@@ -38,28 +38,6 @@ export default function NotificationBell({
       .then((active) => { if (!cancelled) setPushActive(active); })
       .catch(() => undefined);
     return () => { cancelled = true; };
-  }, [profileId]);
-
-  useEffect(() => {
-    let active = true;
-    const loadUnreadChats = async () => {
-      const { data, error } = await supabase.rpc('chat_inbox');
-      if (active && !error) {
-        setUnreadChats(((data ?? []) as { unread_count?: number | string }[])
-          .reduce((sum, conversation) => sum + Number(conversation.unread_count ?? 0), 0));
-      }
-    };
-    void loadUnreadChats();
-    const channel = supabase.channel(`chat-bell:${profileId}`)
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'chat_messages' }, () => { void loadUnreadChats(); })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'chat_reads', filter: `user_id=eq.${profileId}` }, () => { void loadUnreadChats(); })
-      .subscribe();
-    const refreshTimer = window.setInterval(() => { void loadUnreadChats(); }, 60000);
-    return () => {
-      active = false;
-      window.clearInterval(refreshTimer);
-      void supabase.removeChannel(channel);
-    };
   }, [profileId]);
 
   async function enableNotifications() {

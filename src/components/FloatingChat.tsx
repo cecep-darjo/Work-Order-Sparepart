@@ -1,15 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { MessageCircle, Plus, Search, Send, Users, X, Minus, ChevronLeft } from 'lucide-react';
 import { Badge, Button, Input, Textarea } from '@/components/ui';
 import { useAuth } from '@/context/AuthContext';
 import { supabase } from '@/lib/supabase';
+import { rememberSenders, resolveSender, useChatInbox, useChatMessageEvents, type ChatMessageRow as MessageRow } from '@/lib/chatHub';
 
-type InboxRow = {
-  conversation_id: string; conversation_type: 'direct' | 'department'; department_id: string | null;
-  department_name: string | null; peer_id: string | null; peer_name: string | null;
-  last_message: string | null; last_message_at: string | null; unread_count: number;
-};
-type MessageRow = { id: string; conversation_id: string; sender_id: string; body: string; created_at: string; sender?: { full_name: string } | null };
 type ChatUser = { id: string; full_name: string; role: string };
 type ChatDepartment = { id: string; name: string };
 
@@ -17,9 +12,9 @@ const timeLabel = (value: string) => new Intl.DateTimeFormat('id-ID', { hour: '2
 
 export default function FloatingChat() {
   const { profile } = useAuth();
+  const { inbox, unreadTotal, refresh: refreshInbox, markRead } = useChatInbox(profile?.id);
   const [open, setOpen] = useState(false);
   const [minimized, setMinimized] = useState(false);
-  const [inbox, setInbox] = useState<InboxRow[]>([]);
   const [departments, setDepartments] = useState<ChatDepartment[]>([]);
   const [messages, setMessages] = useState<MessageRow[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -34,34 +29,19 @@ export default function FloatingChat() {
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const refreshInbox = useCallback(async () => {
-    const { data, error: inboxError } = await supabase.rpc('chat_inbox');
-    if (!inboxError) setInbox((data ?? []) as InboxRow[]);
-  }, []);
-
   const refreshMessages = useCallback(async (conversationId: string) => {
     await supabase.rpc('chat_mark_read', { p_conversation_id: conversationId });
     const { data, error: messageError } = await supabase.from('chat_messages')
       .select('id,conversation_id,sender_id,body,created_at,sender:profiles!sender_id(full_name)')
       .eq('conversation_id', conversationId).order('created_at', { ascending: false }).limit(100);
     if (messageError) setError(messageError.message);
-    else setMessages(((data ?? []) as MessageRow[]).reverse());
-    await refreshInbox();
-  }, [refreshInbox]);
-
-  useEffect(() => {
-    if (!profile?.id) return;
-    void refreshInbox();
-    const channel = supabase.channel(`floating-chat:${profile.id}`)
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'chat_messages' }, (payload) => {
-        const message = payload.new as MessageRow;
-        void refreshInbox();
-        if (open && message.conversation_id === selected) void refreshMessages(message.conversation_id);
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'chat_reads', filter: `user_id=eq.${profile.id}` }, () => { void refreshInbox(); })
-      .subscribe();
-    return () => { void supabase.removeChannel(channel); };
-  }, [open, profile?.id, refreshInbox, refreshMessages, selected]);
+    else {
+      const rows = ((data ?? []) as unknown as MessageRow[]).reverse();
+      rememberSenders(rows);
+      setMessages(rows);
+    }
+    markRead(conversationId);
+  }, [markRead]);
 
   useEffect(() => {
     if (!open) return;
@@ -74,9 +54,21 @@ export default function FloatingChat() {
   }, [open, refreshMessages, selected]);
   useEffect(() => { scrollRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
 
-  const unreadTotal = useMemo(() => inbox.reduce((sum, item) => sum + Number(item.unread_count ?? 0), 0), [inbox]);
   const active = inbox.find((item) => item.conversation_id === selected);
   const list = inbox.filter((item) => `${item.department_name ?? ''} ${item.peer_name ?? ''}`.toLowerCase().includes(query.toLowerCase()));
+
+  // Pesan baru datang lewat channel bersama (payload realtime): cukup ditambahkan ke daftar,
+  // tanpa mengunduh ulang 100 pesan. Inbox/badge diperbarui oleh hub.
+  useChatMessageEvents(profile?.id, (message) => {
+    if (!open || !selected || message.conversation_id !== selected) return;
+    if (!message.id) { void refreshMessages(selected); return; }
+    const mine = message.sender_id === profile?.id;
+    void (async () => {
+      const sender = !mine && active?.conversation_type === 'department' ? await resolveSender(message.sender_id) : null;
+      setMessages((current) => (current.some((item) => item.id === message.id) ? current : [...current, { ...message, sender }]));
+      if (!mine) void supabase.rpc('chat_mark_read', { p_conversation_id: message.conversation_id });
+    })();
+  });
 
   async function findUsers() {
     const { data, error: searchError } = await supabase.rpc('chat_search_users', { p_query: query });

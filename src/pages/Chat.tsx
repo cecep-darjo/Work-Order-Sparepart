@@ -3,19 +3,8 @@ import { MessageCircle, Plus, Search, Send, Users } from 'lucide-react';
 import { Badge, Button, Card, Input, Spinner, Textarea } from '@/components/ui';
 import { useAuth } from '@/context/AuthContext';
 import { supabase } from '@/lib/supabase';
+import { rememberSenders, resolveSender, useChatInbox, useChatMessageEvents, type ChatMessageRow as ChatMessage } from '@/lib/chatHub';
 
-type InboxRow = {
-  conversation_id: string;
-  conversation_type: 'direct' | 'department';
-  department_id: string | null;
-  department_name: string | null;
-  peer_id: string | null;
-  peer_name: string | null;
-  last_message: string | null;
-  last_message_at: string | null;
-  unread_count: number;
-};
-type ChatMessage = { id: string; conversation_id: string; sender_id: string; body: string; created_at: string; sender?: { full_name: string } | null };
 type ChatUser = { id: string; full_name: string; role: string; department_id: string | null };
 type ChatDepartment = { id: string; name: string };
 
@@ -25,7 +14,7 @@ const formatTime = (value: string | null) => value
 
 export default function Chat() {
   const { profile } = useAuth();
-  const [inbox, setInbox] = useState<InboxRow[]>([]);
+  const { inbox, loaded, error: inboxError, refresh: loadInbox, markRead } = useChatInbox(profile?.id);
   const [departments, setDepartments] = useState<ChatDepartment[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [users, setUsers] = useState<ChatUser[]>([]);
@@ -36,22 +25,17 @@ export default function Chat() {
   const [broadcastDepartments, setBroadcastDepartments] = useState<string[]>([]);
   const [broadcastBody, setBroadcastBody] = useState('');
   const [showNew, setShowNew] = useState(false);
-  const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
-  const loadInbox = useCallback(async () => {
-    const [{ data: inboxData, error: inboxError }, { data: deptData, error: deptError }] = await Promise.all([
-      supabase.rpc('chat_inbox'),
-      supabase.rpc('chat_my_departments'),
-    ]);
-    if (inboxError || deptError) setError(inboxError?.message ?? deptError?.message ?? 'Gagal memuat percakapan. Terapkan migrasi chat terlebih dahulu.');
-    else {
-      setInbox((inboxData ?? []) as InboxRow[]);
-      setDepartments((deptData ?? []) as ChatDepartment[]);
-    }
-    setLoading(false);
+  // Inbox datang dari hub bersama; daftar departemen cukup dimuat sekali (bukan tiap ada pesan masuk).
+  useEffect(() => { if (inboxError) setError(inboxError); }, [inboxError]);
+  useEffect(() => {
+    void supabase.rpc('chat_my_departments').then(({ data, error: deptError }) => {
+      if (deptError) setError(deptError.message);
+      else setDepartments((data ?? []) as ChatDepartment[]);
+    });
   }, []);
 
   const loadMessages = useCallback(async (conversationId: string) => {
@@ -61,26 +45,29 @@ export default function Chat() {
       .eq('conversation_id', conversationId).order('created_at', { ascending: false }).limit(200);
     if (markError || messageError) setError(markError?.message ?? messageError?.message ?? 'Gagal memuat pesan.');
     else {
-      setMessages(((data ?? []) as ChatMessage[]).reverse());
-      setInbox((current) => current.map((row) => row.conversation_id === conversationId ? { ...row, unread_count: 0 } : row));
+      const rows = ((data ?? []) as unknown as ChatMessage[]).reverse();
+      rememberSenders(rows);
+      setMessages(rows);
+      markRead(conversationId);
     }
-  }, []);
+  }, [markRead]);
 
-  useEffect(() => { void loadInbox(); }, [loadInbox]);
   useEffect(() => {
     if (!selected) { setMessages([]); return; }
     void loadMessages(selected);
   }, [loadMessages, selected]);
-  useEffect(() => {
-    if (!profile?.id) return;
-    const channel = supabase.channel(`chat:${profile.id}`)
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'chat_messages' }, (payload) => {
-        const row = payload.new as ChatMessage;
-        void loadInbox();
-        if (row.conversation_id === selected) void loadMessages(row.conversation_id);
-      }).subscribe();
-    return () => { void supabase.removeChannel(channel); };
-  }, [loadInbox, loadMessages, profile?.id, selected]);
+  // Pesan baru lewat channel bersama: tambahkan dari payload, tanpa mengunduh ulang 200 pesan.
+  useChatMessageEvents(profile?.id, (row) => {
+    if (!selected || row.conversation_id !== selected) return;
+    if (!row.id) { void loadMessages(selected); return; }
+    const mine = row.sender_id === profile?.id;
+    const isDepartment = inbox.find((item) => item.conversation_id === selected)?.conversation_type === 'department';
+    void (async () => {
+      const sender = !mine && isDepartment ? await resolveSender(row.sender_id) : null;
+      setMessages((current) => (current.some((item) => item.id === row.id) ? current : [...current, { ...row, sender }]));
+      if (!mine) void supabase.rpc('chat_mark_read', { p_conversation_id: row.conversation_id });
+    })();
+  });
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
 
   const visibleInbox = useMemo(() => inbox.filter((row) => {
@@ -130,7 +117,7 @@ export default function Chat() {
     }
   }
 
-  if (loading) return <Spinner />;
+  if (!loaded) return <Spinner />;
   const activeRow = inbox.find((row) => row.conversation_id === selected);
 
   return <div className="mx-auto max-w-7xl space-y-4">

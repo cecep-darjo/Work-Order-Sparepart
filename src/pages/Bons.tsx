@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { supabase, fetchAllRows } from '@/lib/supabase';
+import { fetchSpareParts } from '@/lib/sparePartsCache';
 import { Badge, Button, Card, EmptyState, Input, Label, Modal, Select, Spinner, Textarea } from '@/components/ui';
 import { SearchablePicker, matchesQuery } from '@/components/Pickers';
 import { groupNameMap, partPickerOption, type GroupInfo } from '@/lib/partOptions';
@@ -279,11 +280,7 @@ export default function Bons() {
   // saat form dibuka (sekali), bukan setiap kali halaman Bon dibuka.
   const loadParts = useCallback(async () => {
     const [allSp, grps] = await Promise.all([
-      fetchAllRows<PartOption>(
-        'spare_parts',
-        'id, code, name, unit, category, location, current_stock, inventory_code, group_id',
-        'name'
-      ),
+      fetchSpareParts(),
       fetchAllRows<GroupInfo>('inventory_groups', 'id, name', 'name'),
     ]);
     setParts((allSp ?? []) as PartOption[]);

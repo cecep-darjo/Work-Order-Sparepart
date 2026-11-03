@@ -1,3 +1,4 @@
+import { usePolling } from '@/lib/usePolling';
 import { useCallback, useEffect, useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { supabase, type Profile } from '@/lib/supabase';
@@ -296,19 +297,10 @@ export function PartRequestsInbox() {
 
   useEffect(() => {
     load();
-    // Permintaan baru dari teknisi muncul otomatis tanpa perlu reload halaman.
-    const timer = setInterval(() => {
-      if (document.visibilityState === 'visible') load(true);
-    }, 60000);
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') load(true);
-    };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => {
-      clearInterval(timer);
-      document.removeEventListener('visibilitychange', onVisible);
-    };
   }, [load, profile?.role]);
+
+  // Permintaan baru dari teknisi muncul otomatis tanpa perlu reload halaman.
+  usePolling(() => load(true), 120000);
 
   if (!profile) return null;
 

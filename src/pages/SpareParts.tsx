@@ -2,7 +2,6 @@ import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import {
   supabase,
-  fetchAllRows,
   stockStatus,
   type SparePart,
   type PartCategory,
@@ -10,6 +9,7 @@ import {
   type PartLocation,
   type InventoryGroup,
 } from '@/lib/supabase';
+import { fetchSpareParts, dropSparePart } from '@/lib/sparePartsCache';
 import { useDebouncedValue } from '@/lib/useDebouncedValue';
 import { matchesQuery, SearchablePicker, type PickerOption } from '@/components/Pickers';
 import { groupNameMap } from '@/lib/partOptions';
@@ -152,7 +152,7 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
     setRefreshing(true);
     // Ambil SEMUA spare part (melewati limit ~1000 baris/query), lalu saring di sisi klien
     // sesuai kata kunci pencarian dan filter stok.
-    const all = await fetchAllRows<SparePart>('spare_parts', '*', 'name');
+    const all = await fetchSpareParts();
     if (seq !== reqSeq.current) return; // sudah ada permintaan yang lebih baru; abaikan jawaban usang
     setAllParts(all);
     setLoading(false);
@@ -301,7 +301,8 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
 
   async function handleDelete(id: string) {
     if (!confirm('Delete this spare part?')) return;
-    await supabase.from('spare_parts').delete().eq('id', id);
+    const { error } = await supabase.from('spare_parts').delete().eq('id', id);
+    if (!error) dropSparePart(id);
     loadParts();
   }
 
@@ -345,7 +346,7 @@ export default function SpareParts({ lowStockOnly = false }: { lowStockOnly?: bo
         list = sortedParts;
         scopeLabel = `Sesuai tampilan layar${search ? ` (pencarian: "${search}")` : ''}`;
       } else {
-        const all = await fetchAllRows<SparePart>('spare_parts', '*', 'name');
+        const all = await fetchSpareParts();
         list = all;
         scopeLabel = 'Semua spare part';
         if (opname.scope === 'location') {
